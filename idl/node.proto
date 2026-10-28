@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package node;
+
+option go_package = "tuserv/kitex_gen/node";
+
+// Gate 只负责把逻辑节点的推送写回指定会话。
+service Gate {
+  rpc Push(PushReq) returns (PushResp);
+}
+
+// Logic 接收网关转发的客户端包，并在本节点内按区服广播。
+service Logic {
+  rpc Dispatch(DispatchReq) returns (DispatchResp);
+  rpc NotifyServer(NotifyReq) returns (NotifyResp);
+}
+
+// Cross 预留给以后的跨服玩法，目前只用于占住服务名。
+service Cross {
+  rpc Ping(PingReq) returns (PingResp);
+}
+
+message DispatchReq {
+  string gate_id = 1;
+  string session_id = 2;
+  int32 server_id = 3;
+  int64 player_id = 4;
+  int32 cmd_id = 5;
+  bytes body = 6;
+}
+
+message DispatchResp {
+  int64 player_id = 1;
+  int32 cmd_id = 2;
+  bytes body = 3;
+}
+
+message PushReq {
+  string session_id = 1;
+  int32 cmd_id = 2;
+  bytes body = 3;
+}
+
+message PushResp {}
+
+message NotifyReq {
+  int32 server_id = 1;
+  int32 cmd_id = 2;
+  bytes body = 3;
+}
+
+message NotifyResp {}
+
+message PingReq {}
+
+message PingResp {}

@@ -1,0 +1,19 @@
+service_name: Logic
+weight: 10
+listen_addr: :9101
+advertise_addr: 127.0.0.1:9101
+etcd:
+  endpoints:
+    - 127.0.0.1:2379
+mongo:
+  uri: mongodb://127.0.0.1:27017
+  db_prefix: game_
+flush_interval: 1s
+log:
+  level: info
+  format: text
+  dir: logs
+  name: logic
+  max_size_mb: 100
+  max_age_days: 7
+  also_stdout: true

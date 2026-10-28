@@ -1,0 +1,17 @@
+service_name: Gate
+weight: 10
+listen_addr: :9001
+advertise_addr: 127.0.0.1:9001
+tcp_addr: :8001
+ws_addr: :8002
+etcd:
+  endpoints:
+    - 127.0.0.1:2379
+log:
+  level: info
+  format: text
+  dir: logs
+  name: gate
+  max_size_mb: 100
+  max_age_days: 7
+  also_stdout: true

@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package game;
+
+option go_package = "tuserv/example/demo/gen/game";
+
+message LoginReq {
+  string name = 1;
+}
+
+message LoginResp {
+  int64 player_id = 1;
+  int32 level = 2;
+  int32 exp = 3;
+}
+
+message LevelUpReq {
+  int32 exp = 1;
+}
+
+message LevelUpResp {
+  int32 level = 1;
+  int32 exp = 2;
+}
+
+message UseItemReq {
+  int32 item_id = 1;
+  int32 count = 2;
+}
+
+message UseItemResp {
+  int32 item_id = 1;
+  int32 left = 2;
+}
+
+message ChatReq {
+  string text = 1;
+}
+
+message ChatResp {}
+
+message ChatPush {
+  string name = 1;
+  string text = 2;
+}
+
+message CreateGuildReq {
+  string name = 1;
+}
+
+message JoinGuildReq {
+  int64 guild_id = 1;
+}
+
+message GuildResp {
+  int64 guild_id = 1;
+  string name = 2;
+}
