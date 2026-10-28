@@ -1,11 +1,10 @@
 package entity
 
 import (
-	"strconv"
-
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"tuserv/pkg/entity"
+	"tuserv/pkg/owner"
 )
 
 // Guild 按实体键路由到唯一节点。成员列表不能在每个逻辑节点各缓存一份。
@@ -37,9 +36,9 @@ func (g *Guild) ServerID() int32 { return g.Server }
 // Collection 是 Mongo 集合名。
 func (g *Guild) Collection() string { return "guild" }
 
-// RouteKey 用区服和自增号。主人节点按这个键确定，换 ObjectID 会把同一公会分到另一台机器。
+// RouteKey 与主人运行时共用实体键，避免缓存与转发把同一公会分到不同节点。
 func (g *Guild) RouteKey() string {
-	return strconv.FormatInt(int64(g.Server), 10) + ":" + strconv.FormatInt(g.GuildID, 10)
+	return owner.Key(g.Server, "guild", g.GuildID).String()
 }
 
 // Placement 声明公会必须按键找主人节点。

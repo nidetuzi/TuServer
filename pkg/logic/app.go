@@ -2,10 +2,12 @@ package logic
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"tuserv/pkg/actor"
 	"tuserv/pkg/handler"
+	"tuserv/pkg/owner"
 	"tuserv/pkg/router"
 )
 
@@ -42,8 +44,8 @@ type App struct {
 
 	mu       sync.Mutex
 	sessions map[string]Session
-	// Internal 处理框架保留的 cmdId 0，用来把公会操作转到主人节点上的 actor。
-	Internal func(context.Context, Request) (Response, error)
+	// Owners 在实体自己的邮箱中处理内部调用，不能先进入会话邮箱再等待自己。
+	Owners *owner.Runtime
 }
 
 // New 创建逻辑节点运行时。
@@ -64,8 +66,12 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 		a.mu.Unlock()
 		return Response{}, nil
 	}
-	if req.CmdID == 0 && a.Internal != nil {
-		return a.handleInternal(ctx, req)
+	if req.CmdID == 0 {
+		if a.Owners == nil {
+			return Response{}, errors.New("logic: owner runtime unavailable")
+		}
+		body, err := a.Owners.Handle(ctx, req.Body)
+		return Response{Body: body}, err
 	}
 	var (
 		resp Response
@@ -75,7 +81,8 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 	if key == "" {
 		key = "player"
 	}
-	runErr := a.Actors.Do(ctx, key, func() {
+	// 会话键与共享实体键分开命名，避免客户端会话编号占用实体邮箱。
+	runErr := a.Actors.Do(ctx, "session/"+key, func() {
 		hctx := handler.New(ctx, handler.Meta{
 			ServerID:  req.ServerID,
 			PlayerID:  req.PlayerID,
@@ -101,24 +108,6 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 			}
 			a.mu.Unlock()
 		}
-	})
-	if runErr != nil {
-		return Response{}, runErr
-	}
-	return resp, err
-}
-
-func (a *App) handleInternal(ctx context.Context, req Request) (Response, error) {
-	key := req.SessionID
-	if key == "" {
-		key = "internal"
-	}
-	var (
-		resp Response
-		err  error
-	)
-	runErr := a.Actors.Do(ctx, key, func() {
-		resp, err = a.Internal(ctx, req)
 	})
 	if runErr != nil {
 		return Response{}, runErr

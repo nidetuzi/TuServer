@@ -3,38 +3,60 @@ package service
 import (
 	"context"
 	"errors"
-	"strconv"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"tuserv/example/demo/entity"
 	"tuserv/pkg/cache"
 	core "tuserv/pkg/entity"
 	"tuserv/pkg/handler"
+	"tuserv/pkg/owner"
 	"tuserv/pkg/store"
 )
 
-// GuildRemote 在本节点不是公会主人时把操作转到主人节点。
-// Local 返回 true 时服务直接改本地缓存。
-type GuildRemote interface {
-	Local(routeKey string) bool
-	Create(ctx context.Context, g *entity.Guild) error
-	Join(ctx context.Context, serverID int32, guildID, playerID int64) (*entity.Guild, error)
+// GuildResult 返回公会快照，避免调用方持有主人节点的可变实体。
+type GuildResult struct {
+	GuildID  int64
+	ServerID int32
+	Name     string
+	Members  []int64
+}
+
+type guildCreateArgs struct {
+	OID      primitive.ObjectID
+	Name     string
+	PlayerID int64
+}
+
+type guildJoinArgs struct {
+	PlayerID int64
 }
 
 // GuildService 维护公会成员，并把公会编号写回角色。
 type GuildService struct {
 	cache  *cache.Cache
 	store  store.Store
-	remote GuildRemote
+	owners *owner.Runtime
 }
 
-// NewGuildService 创建公会服务。remote 为空时视为所有公会都在本节点。
-func NewGuildService(c *cache.Cache, st store.Store, remote GuildRemote) *GuildService {
-	s := &GuildService{cache: c, store: st, remote: remote}
-	return s
+// NewGuildService 要求显式提供主人运行时，避免缺少路由时静默写入本节点。
+func NewGuildService(c *cache.Cache, st store.Store, owners *owner.Runtime) *GuildService {
+	if owners == nil {
+		panic("service: guild owner runtime is required")
+	}
+	return &GuildService{cache: c, store: st, owners: owners}
+}
+
+// RegisterOwners 在装配阶段注册公会操作，确保本地与转发请求共用主人邮箱。
+func (s *GuildService) RegisterOwners() error {
+	if err := owner.Register(s.owners, "guild.create", s.createOnOwner); err != nil {
+		return err
+	}
+	return owner.Register(s.owners, "guild.join", s.joinOnOwner)
 }
 
 // Create 新建公会。已有公会的角色不能再创建，避免一个人挂在两个公会里。
-func (s *GuildService) Create(ctx *handler.Context, name string) (*entity.Guild, error) {
+func (s *GuildService) Create(ctx *handler.Context, name string) (*GuildResult, error) {
 	if name == "" || len(name) > 16 {
 		return nil, ErrBadName
 	}
@@ -45,29 +67,27 @@ func (s *GuildService) Create(ctx *handler.Context, name string) (*entity.Guild,
 	if p.GuildID != 0 {
 		return nil, ErrAlreadyInGuild
 	}
-	g := entity.NewGuild(ctx.ServerID, name, p.PlayerID)
 	id, err := s.store.NextID(ctx, ctx.ServerID, "guild")
 	if err != nil {
 		return nil, err
 	}
-	g.GuildID, err = core.WithServer(ctx.ServerID, id)
+	guildID, err := core.WithServer(ctx.ServerID, id)
 	if err != nil {
 		return nil, err
 	}
-	if s.remote != nil && !s.remote.Local(g.RouteKey()) {
-		if err := s.remote.Create(ctx, g); err != nil {
-			return nil, err
-		}
-	} else {
-		s.Keep(g)
+	result, err := owner.Call[GuildResult](ctx, s.owners, owner.Key(ctx.ServerID, "guild", guildID), "guild.create", guildCreateArgs{
+		OID: primitive.NewObjectID(), Name: name, PlayerID: p.PlayerID,
+	})
+	if err != nil {
+		return nil, err
 	}
-	p.GuildID = g.GuildID
+	p.GuildID = result.GuildID
 	p.MarkDirty()
-	return g, nil
+	return &result, nil
 }
 
-// Join 把角色写入公会成员。非主人节点只转发，不在本地再改一份成员列表。
-func (s *GuildService) Join(ctx *handler.Context, guildID int64) (*entity.Guild, error) {
+// Join 把角色写入公会成员。调用方只接收快照，不在本地缓存另一份公会。
+func (s *GuildService) Join(ctx *handler.Context, guildID int64) (*GuildResult, error) {
 	if guildID == 0 {
 		return nil, ErrBadArg
 	}
@@ -78,29 +98,51 @@ func (s *GuildService) Join(ctx *handler.Context, guildID int64) (*entity.Guild,
 	if p.GuildID != 0 {
 		return nil, ErrAlreadyInGuild
 	}
-	routeKey := strconv.FormatInt(int64(ctx.ServerID), 10) + ":" + strconv.FormatInt(guildID, 10)
-	if s.remote != nil && !s.remote.Local(routeKey) {
-		g, err := s.remote.Join(ctx, ctx.ServerID, guildID, p.PlayerID)
-		if err != nil {
-			return nil, err
-		}
-		p.GuildID = g.GuildID
-		p.MarkDirty()
-		return g, nil
-	}
-	g, err := s.Load(ctx, ctx.ServerID, guildID)
+	result, err := owner.Call[GuildResult](ctx, s.owners, owner.Key(ctx.ServerID, "guild", guildID), "guild.join", guildJoinArgs{PlayerID: p.PlayerID})
 	if err != nil {
 		return nil, err
 	}
-	g.AddMember(p.PlayerID)
-	g.MarkDirty()
-	p.GuildID = g.GuildID
+	p.GuildID = result.GuildID
 	p.MarkDirty()
-	return g, nil
+	return &result, nil
 }
 
-// Load 按自增号取出公会。主人节点处理转发来的加入请求时也走这里。
-func (s *GuildService) Load(ctx context.Context, serverID int32, guildID int64) (*entity.Guild, error) {
+func (s *GuildService) createOnOwner(_ context.Context, key owner.EntityKey, args guildCreateArgs) (GuildResult, error) {
+	if key.Kind != "guild" || key.ServerID <= 0 || key.ID <= 0 || args.OID.IsZero() || args.PlayerID <= 0 || args.Name == "" || len(args.Name) > 16 {
+		return GuildResult{}, owner.NewError("guild.bad_arg", "invalid guild creation arguments")
+	}
+	g := &entity.Guild{
+		OID: args.OID, GuildID: key.ID, Server: key.ServerID,
+		Name: args.Name, Members: []int64{args.PlayerID},
+	}
+	s.keep(g)
+	return guildResult(g), nil
+}
+
+func (s *GuildService) joinOnOwner(ctx context.Context, key owner.EntityKey, args guildJoinArgs) (GuildResult, error) {
+	if key.Kind != "guild" || key.ServerID <= 0 || key.ID <= 0 || args.PlayerID <= 0 {
+		return GuildResult{}, owner.NewError("guild.bad_arg", "invalid guild join arguments")
+	}
+	g, err := s.Get(ctx, key.ServerID, key.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return GuildResult{}, owner.NewError("guild.not_found", "service: guild not found")
+		}
+		return GuildResult{}, err
+	}
+	if !g.HasMember(args.PlayerID) {
+		g.AddMember(args.PlayerID)
+		g.MarkDirty()
+	}
+	return guildResult(g), nil
+}
+
+func guildResult(g *entity.Guild) GuildResult {
+	return GuildResult{GuildID: g.GuildID, ServerID: g.Server, Name: g.Name, Members: append([]int64(nil), g.Members...)}
+}
+
+// Get 只应在主人邮箱内调用，缓存未命中时由框架加载公会。
+func (s *GuildService) Get(ctx context.Context, serverID int32, guildID int64) (*entity.Guild, error) {
 	e, err := remember(ctx, s.cache, s.store, serverID, "guild", guildID, func() core.Entity { return &entity.Guild{} })
 	if err != nil {
 		return nil, err
@@ -112,8 +154,7 @@ func (s *GuildService) Load(ctx context.Context, serverID int32, guildID int64) 
 	return g, nil
 }
 
-// Keep 把新建公会放进缓存，并挂上自增号别名。主人节点收到转发创建时也要能按这个号找到它。
-func (s *GuildService) Keep(g *entity.Guild) {
+func (s *GuildService) keep(g *entity.Guild) {
 	s.cache.Put(g)
 	s.cache.Alias(g, idKey(g.GuildID))
 }

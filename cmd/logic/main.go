@@ -52,11 +52,20 @@ func main() {
 	c := cache.New(store)
 	players := service.NewPlayerService(c, store, bus)
 	chat := service.NewChatService(&notifyAll{nodes: nodes})
-	guilds := service.NewGuildService(c, store, &guildRemote{self: cfg.AdvertiseAddr, nodes: nodes})
 	r := router.New[int32]()
-	demo.Register(r, demo.Deps{Players: players, Bags: service.NewBagService(), Chat: chat, Guilds: guilds, Bus: bus})
 	app := logic.New(r, players.GetByID)
-	app.Internal = applyGuild(guilds)
+	self := cfg.AdvertiseAddr
+	if self == "" {
+		self = cfg.ListenAddr
+	}
+	owners := newOwners(self, app.Actors, nodes)
+	guilds := service.NewGuildService(c, store, owners)
+	if err := guilds.RegisterOwners(); err != nil {
+		log.Error("register owner operations", "err", err)
+		os.Exit(1)
+	}
+	app.Owners = owners
+	demo.Register(r, demo.Deps{Players: players, Bags: service.NewBagService(), Chat: chat, Guilds: guilds, Bus: bus})
 	reg, err := cluster.NewRegistry(cfg.Etcd.Endpoints)
 	if err != nil {
 		log.Error("etcd registry", "err", err)

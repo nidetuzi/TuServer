@@ -17,6 +17,7 @@ import (
 	core "tuserv/pkg/entity"
 	"tuserv/pkg/event"
 	"tuserv/pkg/logic"
+	"tuserv/pkg/owner"
 	"tuserv/pkg/router"
 	"tuserv/pkg/store/memory"
 )
@@ -42,11 +43,16 @@ func TestDemoFlows(t *testing.T) {
 	bags := service.NewBagService()
 	chatBus := &recordBroadcaster{ch: make(chan int32, 1)}
 	chat := service.NewChatService(chatBus)
-	guilds := service.NewGuildService(c, mem, nil)
 	r := router.New[int32]()
-	Register(r, Deps{Players: players, Bags: bags, Chat: chat, Guilds: guilds, Bus: bus})
 	app := logic.New(r, players.GetByID)
 	defer app.Stop()
+	owners := owner.NewLocal(app.Actors)
+	guilds := service.NewGuildService(c, mem, owners)
+	if err := guilds.RegisterOwners(); err != nil {
+		t.Fatal(err)
+	}
+	app.Owners = owners
+	Register(r, Deps{Players: players, Bags: bags, Chat: chat, Guilds: guilds, Bus: bus})
 
 	loginBody, _ := proto.Marshal(&game.LoginReq{Name: "ann"})
 	resp, err := app.Handle(context.Background(), logic.Request{
