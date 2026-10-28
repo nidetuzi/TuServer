@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"strconv"
-	"sync/atomic"
 
 	"tuserv/example/demo/entity"
 	"tuserv/pkg/cache"
@@ -26,7 +25,6 @@ type GuildService struct {
 	cache  *cache.Cache
 	store  store.Store
 	remote GuildRemote
-	ids    atomic.Int64
 }
 
 // NewGuildService 创建公会服务。remote 为空时视为所有公会都在本节点。
@@ -47,13 +45,21 @@ func (s *GuildService) Create(ctx *handler.Context, name string) (*entity.Guild,
 	if p.GuildID != 0 {
 		return nil, ErrAlreadyInGuild
 	}
-	g := entity.NewGuild(ctx.ServerID, s.ids.Add(1), name, p.PlayerID)
+	g := entity.NewGuild(ctx.ServerID, name, p.PlayerID)
+	id, err := s.store.NextID(ctx, ctx.ServerID, "guild")
+	if err != nil {
+		return nil, err
+	}
+	g.GuildID, err = core.WithServer(ctx.ServerID, id)
+	if err != nil {
+		return nil, err
+	}
 	if s.remote != nil && !s.remote.Local(g.RouteKey()) {
 		if err := s.remote.Create(ctx, g); err != nil {
 			return nil, err
 		}
 	} else {
-		s.cache.Put(g)
+		s.Keep(g)
 	}
 	p.GuildID = g.GuildID
 	p.MarkDirty()
@@ -82,18 +88,34 @@ func (s *GuildService) Join(ctx *handler.Context, guildID int64) (*entity.Guild,
 		p.MarkDirty()
 		return g, nil
 	}
-	e, err := s.cache.Get(ctx, ctx.ServerID, "guild", strconv.FormatInt(guildID, 10), func() core.Entity {
-		return &entity.Guild{}
-	})
+	g, err := s.Load(ctx, ctx.ServerID, guildID)
 	if err != nil {
 		return nil, err
 	}
-	g := e.(*entity.Guild)
 	g.AddMember(p.PlayerID)
 	g.MarkDirty()
 	p.GuildID = g.GuildID
 	p.MarkDirty()
 	return g, nil
+}
+
+// Load 按自增号取出公会。主人节点处理转发来的加入请求时也走这里。
+func (s *GuildService) Load(ctx context.Context, serverID int32, guildID int64) (*entity.Guild, error) {
+	e, err := remember(ctx, s.cache, s.store, serverID, "guild", guildID, func() core.Entity { return &entity.Guild{} })
+	if err != nil {
+		return nil, err
+	}
+	g, ok := e.(*entity.Guild)
+	if !ok {
+		return nil, errors.New("service: guild type")
+	}
+	return g, nil
+}
+
+// Keep 把新建公会放进缓存，并挂上自增号别名。主人节点收到转发创建时也要能按这个号找到它。
+func (s *GuildService) Keep(g *entity.Guild) {
+	s.cache.Put(g)
+	s.cache.Alias(g, idKey(g.GuildID))
 }
 
 func (s *GuildService) player(ctx *handler.Context) (*entity.Player, error) {

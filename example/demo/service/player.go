@@ -3,8 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"strconv"
-	"sync/atomic"
 
 	"tuserv/example/demo/entity"
 	"tuserv/example/demo/event"
@@ -24,14 +22,11 @@ type PlayerService struct {
 	cache *cache.Cache
 	store store.Store
 	bus   Publisher
-	ids   atomic.Int64
 }
 
-// NewPlayerService 创建角色服务。编号从 1 开始，0 留给未登录会话。
+// NewPlayerService 创建角色服务。自增号从存储的计数器取，0 仍然表示会话还没登录。
 func NewPlayerService(c *cache.Cache, st store.Store, bus Publisher) *PlayerService {
-	s := &PlayerService{cache: c, store: st, bus: bus}
-	s.ids.Store(0)
-	return s
+	return &PlayerService{cache: c, store: st, bus: bus}
 }
 
 // Login 按区服和名字取得角色，没有则创建。未命中时由缓存内部读库，业务不调用 Load。
@@ -54,26 +49,34 @@ func (s *PlayerService) Login(ctx context.Context, serverID int32, name string) 
 		}
 		p := e.(*entity.Player)
 		s.cache.Alias(p, alias)
+		s.cache.Alias(p, idKey(p.PlayerID))
 		return p, nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
 		return nil, err
 	}
-	p := entity.NewPlayer(serverID, s.ids.Add(1), name)
-	s.cache.Put(p)
-	s.cache.Alias(p, alias)
-	return p, nil
-}
-
-// GetByID 按编号读取角色，供上下文的 GetPlayer 使用。
-func (s *PlayerService) GetByID(ctx context.Context, serverID int32, playerID int64) (any, error) {
-	e, err := s.cache.Get(ctx, serverID, "player", strconv.FormatInt(playerID, 10), func() core.Entity {
-		return &entity.Player{}
-	})
+	p := entity.NewPlayer(serverID, name)
+	id, err := s.store.NextID(ctx, serverID, "player")
 	if err != nil {
 		return nil, err
 	}
-	return e.(*entity.Player), nil
+	p.PlayerID, err = core.WithServer(serverID, id)
+	if err != nil {
+		return nil, err
+	}
+	s.cache.Put(p)
+	s.cache.Alias(p, alias)
+	s.cache.Alias(p, idKey(p.PlayerID))
+	return p, nil
+}
+
+// GetByID 按自增编号读取角色。缓存别名没有时再按 id 字段查库，不能把这个号当成 _id。
+func (s *PlayerService) GetByID(ctx context.Context, serverID int32, playerID int64) (any, error) {
+	p, err := remember(ctx, s.cache, s.store, serverID, "player", playerID, func() core.Entity { return &entity.Player{} })
+	if err != nil {
+		return nil, err
+	}
+	return p.(*entity.Player), nil
 }
 
 // AddExp 增加经验。每次升级都发事件，奖励由监听者修改背包。

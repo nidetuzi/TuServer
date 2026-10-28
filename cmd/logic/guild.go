@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"strconv"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"tuserv/example/demo/entity"
-	"tuserv/pkg/cache"
+	"tuserv/example/demo/service"
 	"tuserv/pkg/cluster"
-	core "tuserv/pkg/entity"
 	"tuserv/pkg/logic"
 )
 
 type guildOp struct {
 	Action   string  `json:"action"`
-	ID       string  `json:"id"`
+	OID      string  `json:"oid"`
 	GuildID  int64   `json:"guild_id"`
 	Server   int32   `json:"server"`
 	Name     string  `json:"name"`
@@ -41,14 +42,14 @@ func (g *guildRemote) Local(key string) bool {
 
 func (g *guildRemote) Create(ctx context.Context, guild *entity.Guild) error {
 	return g.call(ctx, guild.RouteKey(), guildOp{
-		Action: "create", ID: guild.CacheKey(), GuildID: guild.GuildID,
+		Action: "create", OID: guild.OID.Hex(), GuildID: guild.GuildID,
 		Server: guild.ServerID(), Name: guild.Name, Members: append([]int64(nil), guild.Members...),
 	})
 }
 
 func (g *guildRemote) Join(ctx context.Context, serverID int32, guildID, playerID int64) (*entity.Guild, error) {
 	key := strconv.FormatInt(int64(serverID), 10) + ":" + strconv.FormatInt(guildID, 10)
-	op := guildOp{Action: "join", Server: serverID, GuildID: guildID, PlayerID: playerID, ID: strconv.FormatInt(guildID, 10)}
+	op := guildOp{Action: "join", Server: serverID, GuildID: guildID, PlayerID: playerID}
 	body, err := json.Marshal(op)
 	if err != nil {
 		return nil, err
@@ -65,7 +66,11 @@ func (g *guildRemote) Join(ctx context.Context, serverID int32, guildID, playerI
 	if err := json.Unmarshal(resp.Body, &back); err != nil {
 		return nil, err
 	}
-	return &entity.Guild{ID: back.ID, GuildID: back.GuildID, Server: back.Server, Name: back.Name, Members: back.Members}, nil
+	oid, err := primitive.ObjectIDFromHex(back.OID)
+	if err != nil {
+		return nil, err
+	}
+	return &entity.Guild{OID: oid, GuildID: back.GuildID, Server: back.Server, Name: back.Name, Members: back.Members}, nil
 }
 
 func (g *guildRemote) call(ctx context.Context, key string, op guildOp) error {
@@ -93,7 +98,7 @@ func (g *guildRemote) owner(key string) (string, error) {
 	return inst.Addr, nil
 }
 
-func applyGuild(c *cache.Cache) func(context.Context, logic.Request) (logic.Response, error) {
+func applyGuild(guilds *service.GuildService) func(context.Context, logic.Request) (logic.Response, error) {
 	return func(ctx context.Context, req logic.Request) (logic.Response, error) {
 		var op guildOp
 		if err := json.Unmarshal(req.Body, &op); err != nil {
@@ -101,19 +106,22 @@ func applyGuild(c *cache.Cache) func(context.Context, logic.Request) (logic.Resp
 		}
 		switch op.Action {
 		case "create":
-			g := &entity.Guild{ID: op.ID, GuildID: op.GuildID, Server: op.Server, Name: op.Name, Members: op.Members}
-			c.Put(g)
-			return logic.Response{}, nil
-		case "join":
-			e, err := c.Get(ctx, op.Server, "guild", op.ID, func() core.Entity { return &entity.Guild{} })
+			oid, err := primitive.ObjectIDFromHex(op.OID)
 			if err != nil {
 				return logic.Response{}, err
 			}
-			g := e.(*entity.Guild)
+			g := &entity.Guild{OID: oid, GuildID: op.GuildID, Server: op.Server, Name: op.Name, Members: op.Members}
+			guilds.Keep(g)
+			return logic.Response{}, nil
+		case "join":
+			g, err := guilds.Load(ctx, op.Server, op.GuildID)
+			if err != nil {
+				return logic.Response{}, err
+			}
 			g.AddMember(op.PlayerID)
 			g.MarkDirty()
 			g.Lock()
-			back := guildOp{ID: g.CacheKey(), GuildID: g.GuildID, Server: g.ServerID(), Name: g.Name, Members: append([]int64(nil), g.Members...)}
+			back := guildOp{OID: g.OID.Hex(), GuildID: g.GuildID, Server: g.ServerID(), Name: g.Name, Members: append([]int64(nil), g.Members...)}
 			g.Unlock()
 			body, err := json.Marshal(back)
 			return logic.Response{Body: body}, err

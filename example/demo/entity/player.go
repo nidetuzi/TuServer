@@ -1,7 +1,7 @@
 package entity
 
 import (
-	"strconv"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 
 	"tuserv/pkg/entity"
 )
@@ -12,30 +12,29 @@ const RewardItemID int32 = 9001
 // Player 是会话本地实体。脏标记嵌在 State 里，业务只调用 MarkDirty。
 type Player struct {
 	entity.State `bson:"-"`
-	ID           string          `bson:"_id"`
-	PlayerID     int64           `bson:"player_id"`
-	Server       int32           `bson:"server_id"`
-	Name         string          `bson:"name"`
-	Level        int32           `bson:"level"`
-	Exp          int32           `bson:"exp"`
-	Bag          map[int32]int32 `bson:"bag"`
-	GuildID      int64           `bson:"guild_id"`
+	OID          primitive.ObjectID `bson:"_id"`
+	PlayerID     int64              `bson:"id"`
+	Server       int32              `bson:"server_id"`
+	Name         string             `bson:"name"`
+	Level        int32              `bson:"level"`
+	Exp          int32              `bson:"exp"`
+	Bag          map[int32]int32    `bson:"bag"`
+	GuildID      int64              `bson:"guild_id"`
 }
 
-// NewPlayer 创建 1 级角色。编号由调用方分配，缓存主键用编号而不是名字。
-func NewPlayer(serverID int32, playerID int64, name string) *Player {
+// NewPlayer 创建 1 级角色。_id 在插入前生成，这样还没刷盘也能放进缓存。业务编号由存储的计数器另行分配。
+func NewPlayer(serverID int32, name string) *Player {
 	return &Player{
-		ID:       strconv.FormatInt(playerID, 10),
-		PlayerID: playerID,
-		Server:   serverID,
-		Name:     name,
-		Level:    1,
-		Bag:      map[int32]int32{},
+		OID:    primitive.NewObjectID(),
+		Server: serverID,
+		Name:   name,
+		Level:  1,
+		Bag:    map[int32]int32{},
 	}
 }
 
-// CacheKey 使用角色编号。名字只是登录时的别名，不能当主键，否则改名会丢掉存档。
-func (p *Player) CacheKey() string { return p.ID }
+// CacheKey 使用 ObjectID。自增号会改查询条件，不能拿来当 Mongo 的 _id。
+func (p *Player) CacheKey() string { return p.OID.Hex() }
 
 // ServerID 决定落在哪个区服库。
 func (p *Player) ServerID() int32 { return p.Server }
@@ -43,8 +42,8 @@ func (p *Player) ServerID() int32 { return p.Server }
 // Collection 是 Mongo 集合名。
 func (p *Player) Collection() string { return "player" }
 
-// RouteKey 对角色没有跨节点意义，返回编号只是为了满足接口。
-func (p *Player) RouteKey() string { return p.ID }
+// RouteKey 对角色没有跨节点意义，返回 _id 只是为了满足接口。
+func (p *Player) RouteKey() string { return p.OID.Hex() }
 
 // Placement 声明角色留在会话节点。
 func (p *Player) Placement() entity.Placement { return entity.PlacementLocal }
@@ -94,7 +93,7 @@ func (p *Player) Persist() (uint64, any) {
 			bag[k] = v
 		}
 		doc = playerDoc{
-			ID: p.ID, PlayerID: p.PlayerID, Server: p.Server, Name: p.Name,
+			OID: p.OID, PlayerID: p.PlayerID, Server: p.Server, Name: p.Name,
 			Level: p.Level, Exp: p.Exp, Bag: bag, GuildID: p.GuildID,
 		}
 	})
@@ -110,12 +109,12 @@ func NeedExp(level int32) int32 {
 }
 
 type playerDoc struct {
-	ID       string          `bson:"_id"`
-	PlayerID int64           `bson:"player_id"`
-	Server   int32           `bson:"server_id"`
-	Name     string          `bson:"name"`
-	Level    int32           `bson:"level"`
-	Exp      int32           `bson:"exp"`
-	Bag      map[int32]int32 `bson:"bag"`
-	GuildID  int64           `bson:"guild_id"`
+	OID      primitive.ObjectID `bson:"_id"`
+	PlayerID int64              `bson:"id"`
+	Server   int32              `bson:"server_id"`
+	Name     string             `bson:"name"`
+	Level    int32              `bson:"level"`
+	Exp      int32              `bson:"exp"`
+	Bag      map[int32]int32    `bson:"bag"`
+	GuildID  int64              `bson:"guild_id"`
 }

@@ -3,6 +3,7 @@ package demo
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -123,7 +124,7 @@ func TestDemoFlows(t *testing.T) {
 	if err := proto.Unmarshal(resp.Body, &gr); err != nil {
 		t.Fatal(err)
 	}
-	ge, err := c.Get(context.Background(), 3, "guild", "1", func() core.Entity { return &entity.Guild{} })
+	ge, err := c.Get(context.Background(), 3, "guild", strconv.FormatInt(gr.GetGuildId(), 10), func() core.Entity { return &entity.Guild{} })
 	if err != nil {
 		t.Fatal(err)
 	}

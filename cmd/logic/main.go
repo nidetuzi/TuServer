@@ -56,7 +56,7 @@ func main() {
 	r := router.New[int32]()
 	demo.Register(r, demo.Deps{Players: players, Bags: service.NewBagService(), Chat: chat, Guilds: guilds, Bus: bus})
 	app := logic.New(r, players.GetByID)
-	app.Internal = applyGuild(c)
+	app.Internal = applyGuild(guilds)
 	reg, err := cluster.NewRegistry(cfg.Etcd.Endpoints)
 	if err != nil {
 		log.Error("etcd registry", "err", err)

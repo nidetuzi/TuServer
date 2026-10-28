@@ -1,0 +1,22 @@
+---
+description: TuServer 分层、日志、依赖和节点约定
+alwaysApply: true
+---
+
+# 架构
+
+- 模块是 `tuserv`。框架在 `pkg`，进程在 `cmd`，玩法 demo 在 `example/demo`。单测和被测文件放在一起。
+- 请求路径是 handler、service、entity。handler 只做参数校验和简单逻辑，改数据和发事件放在 service。
+- 业务只调用缓存的 `Get`。未命中时由框架内部加载 Mongo。不要在业务包里调用 `Load`。
+- 修改实体只打脏标记。落库由节点定时刷盘，退出前再刷一次。
+- 角色属于会话所在节点。公会按实体键转到主人节点，非主人用 Kitex 转发。actor 处理中禁止同步 RPC 回自己。
+- 客户端协议自研，帧是 `uint32 长度 | int32 cmdId | int32 serverId | protobuf`。节点之间只用 Kitex。游戏协议号不要写成 Kitex 方法。
+- 新会话按权重选一次 Logic 并钉住地址。区服不绑定某一台 Logic。
+- 日志只用 `tuserv/pkg/log`。不要直接使用标准库 `log` 或 `log/slog`。配置只用 `gopkg.in/yaml.v3`。
+- `kitex_gen` 和 `example/demo/gen` 由工具生成，不要手改。
+- 不新增方案之外的第三方库。已有直接依赖：kitex、registry-etcd、mongo-driver、protobuf、nbio、yaml.v3。
+
+```go
+// 业务读实体只走 Get。没有则框架内部加载。
+p, err := ctx.GetPlayer()
+```

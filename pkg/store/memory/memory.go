@@ -17,12 +17,13 @@ type record struct {
 type Store struct {
 	mu   sync.Mutex
 	docs map[string]record
+	seqs map[string]int64
 	load int
 }
 
 // New 创建空的内存库。
 func New() *Store {
-	return &Store{docs: make(map[string]record)}
+	return &Store{docs: make(map[string]record), seqs: make(map[string]int64)}
 }
 
 // Loads 返回 Load 被调用的次数，用来确认第二次 Get 没有再读库。
@@ -74,6 +75,15 @@ func (s *Store) Find(_ context.Context, serverID int32, collection, field string
 		}
 	}
 	return store.ErrNotFound
+}
+
+// NextID 在本进程里模拟 uuid 计数器。每个区服、每个名字各自从 1 开始。
+func (s *Store) NextID(_ context.Context, serverID int32, name string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := itoa(serverID) + "|" + name
+	s.seqs[k]++
+	return s.seqs[k], nil
 }
 
 func id(serverID int32, collection, key string) string {

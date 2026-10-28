@@ -1,0 +1,32 @@
+---
+description: TuServer 以 actor 为执行中心、以实体为数据中心
+alwaysApply: true
+---
+
+# 设计中心
+
+执行以 **actor** 为中心。同一玩家的 handler、service、进程内事件都进该会话的邮箱，串行跑完再处理下一条。不要用互斥锁保护角色字段，也不要在 actor 里同步调用自己。跨节点通知用独立协程或单向调用。
+
+数据以 **实体** 为中心。service 改的是内存里的实体，然后 `MarkDirty`。存储、刷盘、加载都在框架里。业务不拼 Mongo 查询，也不把 protobuf 当存档。文档 `_id` 用 Mongo ObjectID，创建时生成。角色、公会这类特殊编号不直接用自增号，而是 `serverID * 100000 + 自增号`。自增号从 1 开始，并且小于 100000。调用方不传入。
+
+连接以 **会话** 为中心。Gate 记住这条连接选中的 Logic 地址和 playerId。推送按会话上的 Gate 地址回去，不按区服找一台固定机器。
+
+共享实体以 **主人节点** 为中心。公会这类数据按实体键确定唯一主人，只在主人的 actor 里改。本节点不是主人时转发过去，不在每个节点各缓存一份。
+
+区服是分库和广播的范围，不是节点的归属。一台 Logic 可以同时服务多个区服。
+
+```go
+// 协议在玩家 actor 里跑完。升级事件的监听者也在这次调用里改背包。
+err := actors.Do(ctx, sessionID, func() {
+    p, err := playerSvc.AddExp(ctx, exp)
+})
+```
+
+```go
+// 共享实体先确认主人，再改实体本身。
+if !guilds.Local(g.RouteKey()) {
+    return guilds.CreateOnOwner(ctx, g)
+}
+g.AddMember(p.ID)
+g.MarkDirty()
+```

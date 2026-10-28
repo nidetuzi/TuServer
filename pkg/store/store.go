@@ -13,4 +13,6 @@ type Store interface {
 	Load(ctx context.Context, serverID int32, collection, key string, dest any) error
 	Save(ctx context.Context, serverID int32, collection, key string, doc any) error
 	Find(ctx context.Context, serverID int32, collection, field string, value any, dest any) error
+	// NextID 从该区服的 uuid 计数器取下一个业务编号。多进程靠同一次原子自增，不在内存里各自计数。
+	NextID(ctx context.Context, serverID int32, name string) (int64, error)
 }

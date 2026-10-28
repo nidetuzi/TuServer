@@ -3,32 +3,33 @@ package entity
 import (
 	"strconv"
 
+	"go.mongodb.org/mongo-driver/bson/primitive"
+
 	"tuserv/pkg/entity"
 )
 
 // Guild 按实体键路由到唯一节点。成员列表不能在每个逻辑节点各缓存一份。
 type Guild struct {
 	entity.State `bson:"-"`
-	ID           string  `bson:"_id"`
-	GuildID      int64   `bson:"guild_id"`
-	Server       int32   `bson:"server_id"`
-	Name         string  `bson:"name"`
-	Members      []int64 `bson:"members"`
+	OID          primitive.ObjectID `bson:"_id"`
+	GuildID      int64              `bson:"id"`
+	Server       int32              `bson:"server_id"`
+	Name         string             `bson:"name"`
+	Members      []int64            `bson:"members"`
 }
 
-// NewGuild 创建只有创建者一名成员的公会。
-func NewGuild(serverID int32, guildID int64, name string, owner int64) *Guild {
+// NewGuild 创建只有创建者一名成员的公会。_id 当场生成，自增号由调用方在计数器返回后写入。
+func NewGuild(serverID int32, name string, owner int64) *Guild {
 	return &Guild{
-		ID:      strconv.FormatInt(guildID, 10),
-		GuildID: guildID,
+		OID:     primitive.NewObjectID(),
 		Server:  serverID,
 		Name:    name,
 		Members: []int64{owner},
 	}
 }
 
-// CacheKey 使用公会编号。
-func (g *Guild) CacheKey() string { return g.ID }
+// CacheKey 使用 ObjectID，和角色一样，避免把自增号写进 _id。
+func (g *Guild) CacheKey() string { return g.OID.Hex() }
 
 // ServerID 决定公会落在哪个区服库。
 func (g *Guild) ServerID() int32 { return g.Server }
@@ -36,9 +37,9 @@ func (g *Guild) ServerID() int32 { return g.Server }
 // Collection 是 Mongo 集合名。
 func (g *Guild) Collection() string { return "guild" }
 
-// RouteKey 带上区服，避免不同区的相同编号被哈希到一起后互相覆盖。
+// RouteKey 用区服和自增号。主人节点按这个键确定，换 ObjectID 会把同一公会分到另一台机器。
 func (g *Guild) RouteKey() string {
-	return strconv.FormatInt(int64(g.Server), 10) + ":" + g.ID
+	return strconv.FormatInt(int64(g.Server), 10) + ":" + strconv.FormatInt(g.GuildID, 10)
 }
 
 // Placement 声明公会必须按键找主人节点。
@@ -73,15 +74,15 @@ func (g *Guild) Persist() (uint64, any) {
 	doc := guildDoc{}
 	gen := g.Capture(func() {
 		members := append([]int64(nil), g.Members...)
-		doc = guildDoc{ID: g.ID, GuildID: g.GuildID, Server: g.Server, Name: g.Name, Members: members}
+		doc = guildDoc{OID: g.OID, GuildID: g.GuildID, Server: g.Server, Name: g.Name, Members: members}
 	})
 	return gen, doc
 }
 
 type guildDoc struct {
-	ID      string  `bson:"_id"`
-	GuildID int64   `bson:"guild_id"`
-	Server  int32   `bson:"server_id"`
-	Name    string  `bson:"name"`
-	Members []int64 `bson:"members"`
+	OID     primitive.ObjectID `bson:"_id"`
+	GuildID int64              `bson:"id"`
+	Server  int32              `bson:"server_id"`
+	Name    string             `bson:"name"`
+	Members []int64            `bson:"members"`
 }
