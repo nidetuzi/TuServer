@@ -75,6 +75,34 @@ func (s *State) EndSave(gen uint64) {
 	}
 }
 
+// InitRev 把新建文档的代数设为 rev，并视为已经与库一致。
+// 创建后立刻插入的角色要用它，避免下一次刷盘拿更小的代数去覆盖库里的版本。
+func (s *State) InitRev(rev uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if rev == 0 {
+		rev = 1
+	}
+	s.gen = rev
+	s.dirty = false
+}
+
+// Restore 用库里读到的代数恢复内存。
+// 不恢复的话，重新加载后的修改会从 1 开始，条件写就挡不住更旧的快照。
+func (s *State) Restore(rev uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gen = rev
+	s.dirty = false
+}
+
+// Generation 返回当前代数。刷盘条件写要用同一把锁里读到的值。
+func (s *State) Generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
+
 // Lock 与业务字段快照共用，避免拷贝到写了一半的结构体。
 func (s *State) Lock() { s.mu.Lock() }
 

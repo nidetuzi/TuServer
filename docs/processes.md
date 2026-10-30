@@ -57,7 +57,7 @@ go run ./cmd/cross config/cross.yaml
 
 实体修改只打脏。Logic 默认每秒 Flush，最终库名由区服决定；角色和公会文档 `_id` 是 ObjectID，业务编号使用区服加序号，详见 [实体](entity.md) 与 [存储](store.md)。
 
-三个入口均等待 SIGINT/SIGTERM。Logic 当前退出顺序是最终 Flush → App.Stop → Kitex.Stop → 关闭 Mongo；定时刷盘协程没有完整取消协调，也没有先停接入、排空邮箱再最终刷盘的屏障。Gate 未保留 TCP/WS 服务句柄来完整停止监听和排空会话。不能据此宣称退出前所有请求都已持久化。
+三个入口均等待 SIGINT/SIGTERM。Logic 的退出顺序是停止 Kitex 接入、停掉刷盘 ticker、排空 actor、再做一次带超时的 Flush，然后关闭 Mongo。Gate 会先停 TCP/WebSocket 监听再停 Kitex，但不会逐个会话通知 Logic。停机超时或进程崩溃时，尚未刷盘的修改仍然只在内存里。
 
 崩溃前尚未 Flush 的数据只在内存。缩短刷盘周期不能代替事务、幂等、备份、在线排他或可靠停机协议。客户端错误也可能导致 Gate 清掉 Logic 绑定，本次帧不重试；详见 [Logic 错误路径](logic.md)。
 

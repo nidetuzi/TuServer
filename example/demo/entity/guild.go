@@ -15,6 +15,8 @@ type Guild struct {
 	Server       int32              `bson:"server_id"`
 	Name         string             `bson:"name"`
 	Members      []int64            `bson:"members"`
+	Rev          uint64             `bson:"rev,omitempty"`
+	Fence        uint64             `bson:"fence,omitempty"`
 }
 
 // NewGuild 创建只有创建者一名成员的公会。_id 当场生成，自增号由调用方在计数器返回后写入。
@@ -43,6 +45,28 @@ func (g *Guild) RouteKey() string {
 
 // Placement 声明公会必须按键找主人节点。
 func (g *Guild) Placement() entity.Placement { return entity.PlacementRouted }
+
+// NoteLoaded 用库里的代数恢复内存版本。
+func (g *Guild) NoteLoaded() { g.Restore(g.Rev) }
+
+// SetFence 记录公会当前主人任期，旧主人的快照不能覆盖它。
+func (g *Guild) SetFence(term uint64) {
+	if term == 0 {
+		return
+	}
+	g.Lock()
+	if term > g.Fence {
+		g.Fence = term
+	}
+	g.Unlock()
+}
+
+// Copy 在锁内复制对外可见的公会字段。
+func (g *Guild) Copy() (name string, members []int64) {
+	g.Lock()
+	defer g.Unlock()
+	return g.Name, append([]int64(nil), g.Members...)
+}
 
 // AddMember 把角色写入成员列表。已经在会里则不重复添加。
 func (g *Guild) AddMember(playerID int64) {
@@ -73,8 +97,9 @@ func (g *Guild) Persist() (uint64, any) {
 	doc := guildDoc{}
 	gen := g.Capture(func() {
 		members := append([]int64(nil), g.Members...)
-		doc = guildDoc{OID: g.OID, GuildID: g.GuildID, Server: g.Server, Name: g.Name, Members: members}
+		doc = guildDoc{OID: g.OID, GuildID: g.GuildID, Server: g.Server, Name: g.Name, Members: members, Fence: g.Fence}
 	})
+	doc.Rev = gen
 	return gen, doc
 }
 
@@ -84,4 +109,9 @@ type guildDoc struct {
 	Server  int32              `bson:"server_id"`
 	Name    string             `bson:"name"`
 	Members []int64            `bson:"members"`
+	Rev     uint64             `bson:"rev,omitempty"`
+	Fence   uint64             `bson:"fence,omitempty"`
 }
+
+// DocVersion 提供条件写使用的代数和任期。
+func (d guildDoc) DocVersion() (uint64, uint64) { return d.Rev, d.Fence }

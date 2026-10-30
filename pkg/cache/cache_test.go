@@ -20,13 +20,26 @@ func (r *rec) ServerID() int32             { return r.Server }
 func (r *rec) Collection() string          { return "player" }
 func (r *rec) RouteKey() string            { return r.ID }
 func (r *rec) Placement() entity.Placement { return entity.PlacementLocal }
+
+type snap struct {
+	ID     string `bson:"_id"`
+	Server int32  `bson:"server_id"`
+	Name   string `bson:"name"`
+	Rev    uint64 `bson:"rev,omitempty"`
+	Fence  uint64 `bson:"fence,omitempty"`
+}
+
+func (s snap) DocVersion() (uint64, uint64) { return s.Rev, s.Fence }
+
 func (r *rec) Persist() (uint64, any) {
-	var doc rec
+	var doc snap
 	gen := r.Capture(func() {
 		doc.ID = r.ID
 		doc.Server = r.Server
 		doc.Name = r.Name
+		doc.Fence = 1
 	})
+	doc.Rev = gen
 	return gen, doc
 }
 
@@ -66,5 +79,33 @@ func TestGetLoadsOnceAndFlushClearsDirty(t *testing.T) {
 	}
 	if loaded.Name != "ann2" {
 		t.Fatalf("落库内容不符: %s", loaded.Name)
+	}
+}
+
+func TestFlushDoesNotOverwriteNewerFence(t *testing.T) {
+	mem := memory.New()
+	ctx := context.Background()
+	newer := snap{ID: "9", Server: 1, Name: "new", Rev: 3, Fence: 4}
+	if err := mem.Save(ctx, 1, "player", "9", newer); err != nil {
+		t.Fatal(err)
+	}
+	c := New(mem)
+	stale := &rec{ID: "9", Server: 1, Name: "old"}
+	stale.InitRev(2)
+	stale.Name = "old"
+	stale.MarkDirty()
+	c.Adopt(stale)
+	if err := c.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var loaded snap
+	if err := mem.Load(ctx, 1, "player", "9", &loaded); err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Name != "new" || loaded.Fence != 4 {
+		t.Fatalf("旧快照覆盖了新文档: %+v", loaded)
+	}
+	if _, err := c.Get(ctx, 1, "player", "9", nil); err == nil {
+		t.Fatal("过期实体应被移出缓存")
 	}
 }

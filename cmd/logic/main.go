@@ -6,10 +6,13 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
 	"tuserv/example/demo"
+	demoentity "tuserv/example/demo/entity"
 	"tuserv/example/demo/service"
 	node "tuserv/kitex_gen/node"
 	logiccli "tuserv/kitex_gen/node/logic"
@@ -58,7 +61,36 @@ func main() {
 	if self == "" {
 		self = cfg.ListenAddr
 	}
-	owners := newOwners(self, app.Actors, nodes)
+	owners := newOwners(self, app.Actors, nodes, store)
+	app.Hooks = logic.Hooks{
+		Self:   self,
+		Leases: store,
+		AskRelease: func(ctx context.Context, host string, body []byte) error {
+			_, err := nodes.Dispatch(ctx, host, logic.Request{GateID: logic.InternalCaller, CmdID: logic.CmdRelinquish, Body: body})
+			return err
+		},
+		Touch: func(ctx context.Context, serverID int32, playerID int64, term uint64) {
+			v, err := players.GetByID(ctx, serverID, playerID)
+			if err != nil {
+				return
+			}
+			if p, ok := v.(*demoentity.Player); ok {
+				p.SetFence(term)
+			}
+		},
+		FlushID: func(ctx context.Context, serverID int32, collection string, id int64) error {
+			e, err := c.Get(ctx, serverID, collection, strconv.FormatInt(id, 10), nil)
+			if err != nil {
+				return nil
+			}
+			err = c.FlushEntity(ctx, e)
+			c.Forget(e)
+			return err
+		},
+		Kick: func(ctx context.Context, gateAddr, sessionID string) {
+			_ = nodes.Push(ctx, gateAddr, sessionID, logic.CmdKick, nil)
+		},
+	}
 	guilds := service.NewGuildService(c, store, owners)
 	if err := guilds.RegisterOwners(); err != nil {
 		log.Error("register owner operations", "err", err)
@@ -77,12 +109,22 @@ func main() {
 		os.Exit(1)
 	}
 	svr := logiccli.NewServer(&logicAPI{app: app, nodes: nodes}, opts...)
+	stopTicker := make(chan struct{})
+	var tickerOnce sync.Once
+	tickerDone := make(chan struct{})
 	go func() {
+		defer close(tickerDone)
 		t := time.NewTicker(cfg.FlushEvery())
 		defer t.Stop()
-		for range t.C {
-			if err := c.Flush(context.Background()); err != nil {
-				log.Error("flush failed", "err", err)
+		for {
+			select {
+			case <-stopTicker:
+				return
+			case <-t.C:
+				app.RenewLeases(context.Background())
+				if err := c.Flush(context.Background()); err != nil {
+					log.Error("flush failed", "err", err)
+				}
 			}
 		}
 	}()
@@ -92,11 +134,43 @@ func main() {
 		}
 	}()
 	wait()
-	if err := c.Flush(context.Background()); err != nil {
-		log.Error("flush failed", "err", err)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	err = logic.ShutdownSteps{
+		StopAccept: func(ctx context.Context) error {
+			done := make(chan struct{})
+			go func() {
+				_ = svr.Stop()
+				close(done)
+			}()
+			select {
+			case <-done:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		},
+		StopTicker: func() {
+			tickerOnce.Do(func() { close(stopTicker) })
+			select {
+			case <-tickerDone:
+			case <-shutdownCtx.Done():
+			}
+		},
+		Drain: app.Shutdown,
+		Flush: func(ctx context.Context) error {
+			flushCtx, flushCancel := context.WithTimeout(ctx, 8*time.Second)
+			defer flushCancel()
+			if err := c.Flush(flushCtx); err != nil {
+				log.Error("flush failed", "err", err)
+				return err
+			}
+			return nil
+		},
+	}.Run(shutdownCtx)
+	if err != nil {
+		log.Error("logic shutdown", "err", err)
 	}
-	app.Stop()
-	_ = svr.Stop()
 	_ = store.Close(context.Background())
 	log.Info("logic exit")
 }

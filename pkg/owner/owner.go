@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"tuserv/pkg/actor"
+	"tuserv/pkg/lease"
 )
 
 // EntityKey 用区服、实体种类和编号共同确定唯一主人及邮箱。
@@ -68,6 +69,8 @@ type Runtime struct {
 	transport  Transport
 	mu         sync.RWMutex
 	operations map[string]operation
+	// Claim 在确认本节点仍是主人后申请任期。失败时操作不会执行。
+	Claim func(context.Context, EntityKey) (uint64, error)
 }
 
 // New 创建显式配置的主人运行时；缺失依赖会在调用时返回配置错误。
@@ -264,6 +267,14 @@ func (r *Runtime) execute(ctx context.Context, req request) (response, error) {
 		}
 		parent, _ := ctx.Value(executionMarker{}).(*executionFrame)
 		executionCtx := context.WithValue(ctx, executionMarker{}, &executionFrame{runtime: r, parent: parent})
+		if r.Claim != nil {
+			term, cerr := r.Claim(executionCtx, req.Key)
+			if cerr != nil {
+				result.Error = errorDTO(cerr)
+				return
+			}
+			executionCtx = lease.WithTerm(executionCtx, term)
+		}
 		result.Result, err = fn(executionCtx, req.Key, req.Args)
 		if err != nil {
 			result = response{Error: errorDTO(err)}

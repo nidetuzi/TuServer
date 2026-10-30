@@ -21,10 +21,10 @@ func (s *BagService) Use(ctx *handler.Context, itemID, count int32) (int32, erro
 		return 0, err
 	}
 	p := v.(*entity.Player)
-	if p.BagCount(itemID) < count {
+	left, ok := p.TryUse(itemID, count)
+	if !ok {
 		return 0, ErrNotEnough
 	}
-	left := p.BagAdd(itemID, -count)
 	p.MarkDirty()
 	return left, nil
 }

@@ -2,13 +2,17 @@ package logic
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	"tuserv/pkg/actor"
 	"tuserv/pkg/handler"
+	"tuserv/pkg/lease"
 	"tuserv/pkg/owner"
 	"tuserv/pkg/router"
+	"tuserv/pkg/store"
 )
 
 // Request 是网关转发到逻辑节点的一帧。字段与内部 RPC 对齐，但这里不依赖生成代码。
@@ -36,14 +40,39 @@ type Session struct {
 	GateAddr string
 }
 
+type binding struct {
+	Session
+	Term uint64
+}
+
+// Hooks 是角色单写和踢线用的节点能力。测试可以只填其中几项。
+type Hooks struct {
+	// Self 是本节点对外地址，租约持有者和它比较。
+	Self string
+	// Leases 保存跨节点任期。为空时只在本进程内按角色串行。
+	Leases store.Locker
+	// AskRelease 通知旧持有者刷盘并交出租约。
+	AskRelease func(ctx context.Context, host string, body []byte) error
+	// Touch 把任期写进已经在内存里的角色，下一份快照才能带上 fencing。
+	Touch func(ctx context.Context, serverID int32, playerID int64, term uint64)
+	// FlushID 刷掉并忘掉某个区服集合里按业务编号找到的内存实体。
+	FlushID func(ctx context.Context, serverID int32, collection string, id int64) error
+	// Kick 让网关关掉旧连接。
+	Kick func(ctx context.Context, gateAddr, sessionID string)
+	// Now 供测试固定租约时间。
+	Now func() time.Time
+}
+
 // App 把协议送进 actor 并维护本节点会话表。
 type App struct {
 	Router *router.Router[int32]
 	Actors *actor.System
 	Load   handler.Loader
+	Hooks  Hooks
 
 	mu       sync.Mutex
 	sessions map[string]Session
+	bound    map[string]binding
 	// Owners 在实体自己的邮箱中处理内部调用，不能先进入会话邮箱再等待自己。
 	Owners *owner.Runtime
 }
@@ -55,16 +84,22 @@ func New(r *router.Router[int32], load handler.Loader) *App {
 		Actors:   actor.NewSystem(),
 		Load:     load,
 		sessions: make(map[string]Session),
+		bound:    make(map[string]binding),
 	}
 }
 
-// Handle 在该会话的 actor 里执行协议。cmdId 小于 0 表示网关通知连接已断开。
+// Handle 在该角色的 actor 里执行协议。已登录的请求按角色编号串行，而不是按连接。
+// cmdId 小于 0 且不是内部交接时，表示网关通知连接已断开。
 func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
+	if req.CmdID == CmdRelinquish {
+		if req.GateID != InternalCaller {
+			a.dropSession(req.SessionID)
+			return Response{}, nil
+		}
+		return Response{}, a.relinquish(ctx, req.Body)
+	}
 	if req.CmdID < 0 {
-		a.mu.Lock()
-		delete(a.sessions, req.SessionID)
-		a.mu.Unlock()
-		return Response{}, nil
+		return Response{}, a.onDisconnect(ctx, req)
 	}
 	if req.CmdID == 0 {
 		if a.Owners == nil {
@@ -77,12 +112,20 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 		resp Response
 		err  error
 	)
-	key := req.SessionID
-	if key == "" {
-		key = "player"
-	}
-	// 会话键与共享实体键分开命名，避免客户端会话编号占用实体邮箱。
-	runErr := a.Actors.Do(ctx, "session/"+key, func() {
+	key := actorKey(req)
+	runErr := a.Actors.Do(ctx, key, func() {
+		if req.PlayerID > 0 && a.stale(req) {
+			a.kick(ctx, req.GateID, req.SessionID)
+			return
+		}
+		term := uint64(0)
+		if req.PlayerID > 0 {
+			term, err = a.enter(ctx, req)
+			if err != nil {
+				return
+			}
+			ctx = lease.WithTerm(ctx, term)
+		}
 		hctx := handler.New(ctx, handler.Meta{
 			ServerID:  req.ServerID,
 			PlayerID:  req.PlayerID,
@@ -97,22 +140,48 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 			err = dispatchErr
 			return
 		}
-		resp = Response{PlayerID: hctx.PlayerID, CmdID: req.CmdID, Body: body}
-		if req.SessionID != "" {
-			a.mu.Lock()
-			a.sessions[req.SessionID] = Session{
-				ID:       req.SessionID,
-				ServerID: req.ServerID,
-				PlayerID: hctx.PlayerID,
-				GateAddr: req.GateID,
+		if term == 0 && hctx.PlayerID > 0 {
+			req.PlayerID = hctx.PlayerID
+			term, err = a.enter(ctx, req)
+			if err != nil {
+				return
 			}
-			a.mu.Unlock()
+		}
+		resp = Response{PlayerID: hctx.PlayerID, CmdID: req.CmdID, Body: body}
+		if hctx.PlayerID > 0 && req.SessionID != "" {
+			a.bindOnline(ctx, req, hctx.PlayerID, term)
 		}
 	})
 	if runErr != nil {
 		return Response{}, runErr
 	}
 	return resp, err
+}
+
+// RenewLeases 给仍在线的角色续约。空闲连接不再发协议时，也不能让租约自己过期后被另一台节点接走。
+func (a *App) RenewLeases(ctx context.Context) {
+	if a.Hooks.Leases == nil {
+		return
+	}
+	a.mu.Lock()
+	list := make([]binding, 0, len(a.bound))
+	for _, b := range a.bound {
+		list = append(list, b)
+	}
+	a.mu.Unlock()
+	for _, b := range list {
+		req := Request{GateID: b.GateAddr, SessionID: b.ID, ServerID: b.ServerID, PlayerID: b.PlayerID}
+		term, err := a.enter(ctx, req)
+		if err != nil {
+			continue
+		}
+		a.mu.Lock()
+		if cur, ok := a.bound[playerActorKey(b.ServerID, b.PlayerID)]; ok && cur.ID == b.ID {
+			cur.Term = term
+			a.bound[playerActorKey(b.ServerID, b.PlayerID)] = cur
+		}
+		a.mu.Unlock()
+	}
 }
 
 // Sessions 返回本节点上某个区服的在线会话。广播不能把别的区服一起推出去。
@@ -128,9 +197,184 @@ func (a *App) Sessions(serverID int32) []Session {
 	return out
 }
 
-// Stop 关闭 actor 邮箱。
+// Stop 关闭 actor 邮箱并等已排队的任务结束。
 func (a *App) Stop() {
 	if a.Actors != nil {
 		a.Actors.Stop()
 	}
+}
+
+// Shutdown 在超时内排空邮箱。停机时先停接入和定时器，再调用它，最后才刷盘。
+func (a *App) Shutdown(ctx context.Context) error {
+	if a.Actors == nil {
+		return nil
+	}
+	return a.Actors.Shutdown(ctx)
+}
+
+func actorKey(req Request) string {
+	if req.PlayerID > 0 {
+		return playerActorKey(req.ServerID, req.PlayerID)
+	}
+	if req.SessionID == "" {
+		return "session/player"
+	}
+	return "session/" + req.SessionID
+}
+
+func (a *App) stale(req Request) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	b, ok := a.bound[playerActorKey(req.ServerID, req.PlayerID)]
+	return ok && b.ID != "" && req.SessionID != "" && b.ID != req.SessionID
+}
+
+func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term uint64) {
+	key := playerActorKey(req.ServerID, playerID)
+	sess := Session{ID: req.SessionID, ServerID: req.ServerID, PlayerID: playerID, GateAddr: req.GateID}
+	a.mu.Lock()
+	a.sessions[req.SessionID] = sess
+	prev, exists := a.bound[key]
+	kickOld := exists && prev.ID != "" && prev.ID != req.SessionID
+	if term == 0 {
+		term = prev.Term
+	}
+	a.bound[key] = binding{Session: sess, Term: term}
+	for k, v := range a.bound {
+		if k != key && v.ID == req.SessionID {
+			delete(a.bound, k)
+		}
+	}
+	if kickOld {
+		delete(a.sessions, prev.ID)
+	}
+	a.mu.Unlock()
+	if kickOld {
+		a.kick(ctx, prev.GateAddr, prev.ID)
+	}
+}
+
+func (a *App) onDisconnect(ctx context.Context, req Request) error {
+	if req.PlayerID <= 0 {
+		a.dropSession(req.SessionID)
+		return nil
+	}
+	return a.Actors.Do(ctx, playerActorKey(req.ServerID, req.PlayerID), func() {
+		key := playerActorKey(req.ServerID, req.PlayerID)
+		a.mu.Lock()
+		b, ok := a.bound[key]
+		a.mu.Unlock()
+		if !ok || b.ID != req.SessionID {
+			a.dropSession(req.SessionID)
+			return
+		}
+		if a.Hooks.FlushID != nil {
+			_ = a.Hooks.FlushID(ctx, req.ServerID, "player", req.PlayerID)
+		}
+		if a.Hooks.Leases != nil {
+			_ = lease.Release(ctx, a.Hooks.Leases, req.ServerID, playerLeaseKey(req.ServerID, req.PlayerID), a.Hooks.Self, b.Term)
+		}
+		a.mu.Lock()
+		if cur, still := a.bound[key]; still && cur.ID == req.SessionID {
+			delete(a.bound, key)
+		}
+		delete(a.sessions, req.SessionID)
+		a.mu.Unlock()
+	})
+}
+
+func (a *App) dropSession(id string) {
+	if id == "" {
+		return
+	}
+	a.mu.Lock()
+	delete(a.sessions, id)
+	a.mu.Unlock()
+}
+
+func (a *App) enter(ctx context.Context, req Request) (uint64, error) {
+	if a.Hooks.Leases == nil || req.PlayerID == 0 {
+		return 0, nil
+	}
+	now := time.Now()
+	if a.Hooks.Now != nil {
+		now = a.Hooks.Now()
+	}
+	key := playerLeaseKey(req.ServerID, req.PlayerID)
+	rec, err := lease.Claim(ctx, a.Hooks.Leases, req.ServerID, key, a.Hooks.Self, req.GateID, req.SessionID, now, lease.TTL)
+	if err != nil {
+		held, ok := err.(*lease.HeldError)
+		if !ok || a.Hooks.AskRelease == nil || held.Owner == "" || held.Owner == a.Hooks.Self {
+			return 0, err
+		}
+		body, mErr := json.Marshal(Release{
+			Kind: KindPlayer, ServerID: req.ServerID, ID: req.PlayerID, Term: held.Term,
+			Gate: req.GateID, Session: req.SessionID,
+		})
+		if mErr != nil {
+			return 0, mErr
+		}
+		if rerr := a.Hooks.AskRelease(ctx, held.Owner, body); rerr != nil {
+			return 0, err
+		}
+		rec, err = lease.Claim(ctx, a.Hooks.Leases, req.ServerID, key, a.Hooks.Self, req.GateID, req.SessionID, now, lease.TTL)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if a.Hooks.Touch != nil {
+		a.Hooks.Touch(ctx, req.ServerID, req.PlayerID, rec.Term)
+	}
+	return rec.Term, nil
+}
+
+func (a *App) relinquish(ctx context.Context, body []byte) error {
+	var rel Release
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return err
+	}
+	if rel.Kind == KindGuild {
+		key := owner.Key(rel.ServerID, KindGuild, rel.ID)
+		return a.Actors.Do(ctx, key.String(), func() {
+			if a.Hooks.FlushID != nil {
+				_ = a.Hooks.FlushID(ctx, rel.ServerID, KindGuild, rel.ID)
+			}
+			if a.Hooks.Leases != nil {
+				_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, key.String(), a.Hooks.Self, rel.Term)
+			}
+		})
+	}
+	if rel.ID == 0 {
+		return nil
+	}
+	return a.Actors.Do(ctx, playerActorKey(rel.ServerID, rel.ID), func() {
+		key := playerActorKey(rel.ServerID, rel.ID)
+		a.mu.Lock()
+		b, ok := a.bound[key]
+		if ok {
+			delete(a.bound, key)
+			delete(a.sessions, b.ID)
+		}
+		a.mu.Unlock()
+		if a.Hooks.FlushID != nil {
+			_ = a.Hooks.FlushID(ctx, rel.ServerID, KindPlayer, rel.ID)
+		}
+		if a.Hooks.Leases != nil {
+			term := rel.Term
+			if ok && b.Term != 0 {
+				term = b.Term
+			}
+			_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, playerLeaseKey(rel.ServerID, rel.ID), a.Hooks.Self, term)
+		}
+		if ok && (b.ID != rel.Session || b.GateAddr != rel.Gate) {
+			a.kick(ctx, b.GateAddr, b.ID)
+		}
+	})
+}
+
+func (a *App) kick(ctx context.Context, gateAddr, sessionID string) {
+	if a.Hooks.Kick == nil || sessionID == "" || gateAddr == "" {
+		return
+	}
+	a.Hooks.Kick(ctx, gateAddr, sessionID)
 }

@@ -3,7 +3,7 @@ package cluster
 import (
 	"errors"
 	"hash/fnv"
-	"sort"
+	"math"
 )
 
 // ErrNoInstance 表示当前没有可用的逻辑节点。
@@ -42,15 +42,53 @@ func PickWeighted(list []Instance, roll func(total int) int) (Instance, error) {
 	return list[len(list)-1], nil
 }
 
-// Owner 按实体键在实例列表上做稳定选择。
-// 公会这类共享实体必须始终落到同一台节点，不能跟着玩家会话走。
+// Owner 用加权 rendezvous hashing 为实体选主人。
+// 增减节点时，只有原本会选中新节点或被摘掉节点的键会迁移，而不是按节点个数取模后全体重映射。
+// Weight 小于等于 0 的节点不参与，用来把正在摘流的进程从公会主人里拿掉。
 func Owner(list []Instance, key string) (Instance, error) {
-	if len(list) == 0 {
+	best := -1
+	var bestScore float64
+	for i, it := range list {
+		if it.Weight <= 0 || it.Addr == "" {
+			continue
+		}
+		score := rendezvousScore(key, it.Addr, it.Weight)
+		if best < 0 || score > bestScore || (score == bestScore && it.Addr < list[best].Addr) {
+			best = i
+			bestScore = score
+		}
+	}
+	if best < 0 {
 		return Instance{}, ErrNoInstance
 	}
-	sorted := append([]Instance(nil), list...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Addr < sorted[j].Addr })
-	h := fnv.New32a()
+	return list[best], nil
+}
+
+// rendezvousScore 是加权 HRW：weight / -ln(u)。权重越大越容易成为最高分。
+// FNV 对「短键 + 单字节地址」的高位不够散，先做一次 splitmix 再映射，避免新增节点搬走一半的键。
+func rendezvousScore(key, addr string, weight int) float64 {
+	h := fnv.New64a()
 	_, _ = h.Write([]byte(key))
-	return sorted[int(h.Sum32())%len(sorted)], nil
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(addr))
+	mixed := splitmix64(h.Sum64())
+	// 取高 53 位映射到 (0, 1]，避免 ln(0)。
+	u := (float64(mixed>>11) + 1) / float64(uint64(1)<<53)
+	if u > 1 {
+		u = 1
+	}
+	score := float64(weight) / -math.Log(u)
+	if math.IsInf(score, 0) || math.IsNaN(score) {
+		return math.MaxFloat64
+	}
+	return score
+}
+
+func splitmix64(x uint64) uint64 {
+	x ^= x >> 30
+	x *= 0xbf58476d1ce4e5b9
+	x ^= x >> 27
+	x *= 0x94d049bb133111eb
+	x ^= x >> 31
+	return x
 }

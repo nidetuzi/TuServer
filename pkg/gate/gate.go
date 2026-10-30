@@ -100,11 +100,14 @@ func (g *Gate) OnClose(p protocol.Peer, _ error) {
 	})
 }
 
-// Push 把逻辑节点的推送写回指定会话。
+// Push 把逻辑节点的推送写回指定会话。踢线帧不写给客户端，直接关掉这条连接。
 func (g *Gate) Push(sessionID string, cmdID, serverID int32, body []byte) error {
 	s := g.session(sessionID)
 	if s == nil {
 		return nil
+	}
+	if cmdID == logic.CmdKick {
+		return s.peer.Close()
 	}
 	return s.peer.WritePacket(protocol.Packet{CmdID: cmdID, ServerID: serverID, Body: body})
 }

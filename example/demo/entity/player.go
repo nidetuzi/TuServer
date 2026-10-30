@@ -20,6 +20,17 @@ type Player struct {
 	Exp          int32              `bson:"exp"`
 	Bag          map[int32]int32    `bson:"bag"`
 	GuildID      int64              `bson:"guild_id"`
+	Rev          uint64             `bson:"rev,omitempty"`
+	Fence        uint64             `bson:"fence,omitempty"`
+}
+
+// Snapshot 是一次加锁读到的角色视图，回包和广播不要在锁外拆字段。
+type Snapshot struct {
+	PlayerID int64
+	Name     string
+	Level    int32
+	Exp      int32
+	GuildID  int64
 }
 
 // NewPlayer 创建 1 级角色。_id 在插入前生成，这样还没刷盘也能放进缓存。业务编号由存储的计数器另行分配。
@@ -47,6 +58,70 @@ func (p *Player) RouteKey() string { return p.OID.Hex() }
 
 // Placement 声明角色留在会话节点。
 func (p *Player) Placement() entity.Placement { return entity.PlacementLocal }
+
+// InitRev 标记这份新建角色已经和插入时的代数对齐。
+func (p *Player) InitRev(rev uint64) {
+	p.State.InitRev(rev)
+	p.Rev = rev
+}
+
+// NoteLoaded 在缓存从库里装入之后恢复代数，条件写才不会用更小的版本覆盖。
+func (p *Player) NoteLoaded() { p.Restore(p.Rev) }
+
+// SetFence 记下当前持有的写入任期。更小的任期不能把刚抢到的任期盖掉。
+func (p *Player) SetFence(term uint64) {
+	if term == 0 {
+		return
+	}
+	p.Lock()
+	if term > p.Fence {
+		p.Fence = term
+	}
+	p.Unlock()
+}
+
+// Snapshot 在锁内拷贝回包需要的字段。
+func (p *Player) Snapshot() Snapshot {
+	p.Lock()
+	defer p.Unlock()
+	return Snapshot{PlayerID: p.PlayerID, Name: p.Name, Level: p.Level, Exp: p.Exp, GuildID: p.GuildID}
+}
+
+// Guild 返回角色当前公会编号。
+func (p *Player) Guild() int64 {
+	p.Lock()
+	defer p.Unlock()
+	return p.GuildID
+}
+
+// SetGuildID 在锁内修改公会编号，避免和刷盘快照并发读写。
+func (p *Player) SetGuildID(id int64) {
+	p.Lock()
+	p.GuildID = id
+	p.Unlock()
+}
+
+// TryUse 在同一把锁里检查并扣减道具。两次加锁之间不能再插进一次扣减。
+func (p *Player) TryUse(itemID, count int32) (left int32, ok bool) {
+	if itemID <= 0 || count <= 0 {
+		return 0, false
+	}
+	p.Lock()
+	defer p.Unlock()
+	if p.Bag == nil || p.Bag[itemID] < count {
+		if p.Bag == nil {
+			return 0, false
+		}
+		return p.Bag[itemID], false
+	}
+	n := p.Bag[itemID] - count
+	if n == 0 {
+		delete(p.Bag, itemID)
+		return 0, true
+	}
+	p.Bag[itemID] = n
+	return n, true
+}
 
 // AddExp 增加经验并在达到阈值时升级。调用方负责发升级事件。
 func (p *Player) AddExp(exp int32) (levels []int32) {
@@ -94,9 +169,10 @@ func (p *Player) Persist() (uint64, any) {
 		}
 		doc = playerDoc{
 			OID: p.OID, PlayerID: p.PlayerID, Server: p.Server, Name: p.Name,
-			Level: p.Level, Exp: p.Exp, Bag: bag, GuildID: p.GuildID,
+			Level: p.Level, Exp: p.Exp, Bag: bag, GuildID: p.GuildID, Fence: p.Fence,
 		}
 	})
+	doc.Rev = gen
 	return gen, doc
 }
 
@@ -117,4 +193,9 @@ type playerDoc struct {
 	Exp      int32              `bson:"exp"`
 	Bag      map[int32]int32    `bson:"bag"`
 	GuildID  int64              `bson:"guild_id"`
+	Rev      uint64             `bson:"rev,omitempty"`
+	Fence    uint64             `bson:"fence,omitempty"`
 }
+
+// DocVersion 提供条件写使用的代数和任期。
+func (d playerDoc) DocVersion() (uint64, uint64) { return d.Rev, d.Fence }

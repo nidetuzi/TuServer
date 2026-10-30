@@ -16,6 +16,7 @@ func OnLevelUp(svc *service.PlayerService) func(*handler.Context, *game.LevelUpR
 		if err != nil {
 			return nil, err
 		}
-		return &game.LevelUpResp{Level: p.Level, Exp: p.Exp}, nil
+		view := p.Snapshot()
+		return &game.LevelUpResp{Level: view.Level, Exp: view.Exp}, nil
 	}
 }

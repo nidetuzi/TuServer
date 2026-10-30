@@ -39,7 +39,7 @@ func (s *ChatService) Send(ctx *handler.Context, text string) error {
 		return err
 	}
 	p := v.(*entity.Player)
-	body, err := proto.Marshal(&game.ChatPush{Name: p.Name, Text: text})
+	body, err := proto.Marshal(&game.ChatPush{Name: p.Snapshot().Name, Text: text})
 	if err != nil {
 		return err
 	}

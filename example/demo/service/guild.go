@@ -10,6 +10,7 @@ import (
 	"tuserv/pkg/cache"
 	core "tuserv/pkg/entity"
 	"tuserv/pkg/handler"
+	"tuserv/pkg/lease"
 	"tuserv/pkg/owner"
 	"tuserv/pkg/store"
 )
@@ -64,7 +65,7 @@ func (s *GuildService) Create(ctx *handler.Context, name string) (*GuildResult, 
 	if err != nil {
 		return nil, err
 	}
-	if p.GuildID != 0 {
+	if p.Guild() != 0 {
 		return nil, ErrAlreadyInGuild
 	}
 	id, err := s.store.NextID(ctx, ctx.ServerID, "guild")
@@ -81,7 +82,7 @@ func (s *GuildService) Create(ctx *handler.Context, name string) (*GuildResult, 
 	if err != nil {
 		return nil, err
 	}
-	p.GuildID = result.GuildID
+	p.SetGuildID(result.GuildID)
 	p.MarkDirty()
 	return &result, nil
 }
@@ -95,25 +96,28 @@ func (s *GuildService) Join(ctx *handler.Context, guildID int64) (*GuildResult, 
 	if err != nil {
 		return nil, err
 	}
-	if p.GuildID != 0 {
+	if p.Guild() != 0 {
 		return nil, ErrAlreadyInGuild
 	}
 	result, err := owner.Call[GuildResult](ctx, s.owners, owner.Key(ctx.ServerID, "guild", guildID), "guild.join", guildJoinArgs{PlayerID: p.PlayerID})
 	if err != nil {
 		return nil, err
 	}
-	p.GuildID = result.GuildID
+	p.SetGuildID(result.GuildID)
 	p.MarkDirty()
 	return &result, nil
 }
 
-func (s *GuildService) createOnOwner(_ context.Context, key owner.EntityKey, args guildCreateArgs) (GuildResult, error) {
+func (s *GuildService) createOnOwner(ctx context.Context, key owner.EntityKey, args guildCreateArgs) (GuildResult, error) {
 	if key.Kind != "guild" || key.ServerID <= 0 || key.ID <= 0 || args.OID.IsZero() || args.PlayerID <= 0 || args.Name == "" || len(args.Name) > 16 {
 		return GuildResult{}, owner.NewError("guild.bad_arg", "invalid guild creation arguments")
 	}
 	g := &entity.Guild{
 		OID: args.OID, GuildID: key.ID, Server: key.ServerID,
 		Name: args.Name, Members: []int64{args.PlayerID},
+	}
+	if term, ok := lease.Term(ctx); ok {
+		g.SetFence(term)
 	}
 	s.keep(g)
 	return guildResult(g), nil
@@ -130,6 +134,9 @@ func (s *GuildService) joinOnOwner(ctx context.Context, key owner.EntityKey, arg
 		}
 		return GuildResult{}, err
 	}
+	if term, ok := lease.Term(ctx); ok {
+		g.SetFence(term)
+	}
 	if !g.HasMember(args.PlayerID) {
 		g.AddMember(args.PlayerID)
 		g.MarkDirty()
@@ -138,7 +145,8 @@ func (s *GuildService) joinOnOwner(ctx context.Context, key owner.EntityKey, arg
 }
 
 func guildResult(g *entity.Guild) GuildResult {
-	return GuildResult{GuildID: g.GuildID, ServerID: g.Server, Name: g.Name, Members: append([]int64(nil), g.Members...)}
+	name, members := g.Copy()
+	return GuildResult{GuildID: g.GuildID, ServerID: g.Server, Name: name, Members: members}
 }
 
 // Get 只应在主人邮箱内调用，缓存未命中时由框架加载公会。

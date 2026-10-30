@@ -16,7 +16,8 @@ func OnLogin(svc *service.PlayerService) func(*handler.Context, *game.LoginReq) 
 		if err != nil {
 			return nil, err
 		}
-		ctx.BindPlayer(p.PlayerID)
-		return &game.LoginResp{PlayerId: p.PlayerID, Level: p.Level, Exp: p.Exp}, nil
+		view := p.Snapshot()
+		ctx.BindPlayer(view.PlayerID)
+		return &game.LoginResp{PlayerId: view.PlayerID, Level: view.Level, Exp: view.Exp}, nil
 	}
 }

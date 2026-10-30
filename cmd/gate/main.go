@@ -57,21 +57,31 @@ func main() {
 			klog.Errorf("gate kitex: %v", err)
 		}
 	}()
+	var tcpSrv *tcp.Server
+	var wsSrv *ws.Server
 	if cfg.TCPAddr != "" {
-		if _, err := tcp.Serve(cfg.TCPAddr, protocol.FrameCodec{}, g); err != nil {
+		tcpSrv, err = tcp.Serve(cfg.TCPAddr, protocol.FrameCodec{}, g)
+		if err != nil {
 			log.Error("tcp serve", "err", err)
 			os.Exit(1)
 		}
 		log.Info("tcp listen", "addr", cfg.TCPAddr)
 	}
 	if cfg.WSAddr != "" {
-		if _, err := ws.Serve(cfg.WSAddr, protocol.FrameCodec{}, g); err != nil {
+		wsSrv, err = ws.Serve(cfg.WSAddr, protocol.FrameCodec{}, g)
+		if err != nil {
 			log.Error("ws serve", "err", err)
 			os.Exit(1)
 		}
 		log.Info("ws listen", "addr", cfg.WSAddr)
 	}
 	wait()
+	if tcpSrv != nil {
+		tcpSrv.Stop()
+	}
+	if wsSrv != nil {
+		wsSrv.Stop()
+	}
 	_ = svr.Stop()
 	log.Info("gate exit")
 }

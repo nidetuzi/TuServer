@@ -45,10 +45,71 @@ func (s *Store) Load(ctx context.Context, serverID int32, collection, key string
 	return err
 }
 
-// Save 用替换写入，保证脏文档整体覆盖旧文档，而不是只更新部分字段。
+// Save 用替换写入。带版本的快照只在库里的代数和任期都不比快照新时覆盖，避免旧刷盘打回新数据。
 func (s *Store) Save(ctx context.Context, serverID int32, collection, key string, doc any) error {
-	_, err := s.coll(serverID, collection).ReplaceOne(ctx, bson.M{"_id": idValue(key)}, doc, options.Replace().SetUpsert(true))
+	coll := s.coll(serverID, collection)
+	id := idValue(key)
+	rev, fence, ok := store.DocVersion(doc)
+	if !ok {
+		_, err := coll.ReplaceOne(ctx, bson.M{"_id": id}, doc, options.Replace().SetUpsert(true))
+		return err
+	}
+	res, err := coll.ReplaceOne(ctx, versionFilter(id, rev, fence), doc)
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount > 0 {
+		return nil
+	}
+	n, err := coll.CountDocuments(ctx, bson.M{"_id": id})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		_, err = coll.InsertOne(ctx, doc)
+		if drv.IsDuplicateKeyError(err) {
+			return store.ErrStale
+		}
+		return err
+	}
+	return store.ErrStale
+}
+
+// Insert 只插入新文档。主键或唯一索引冲突时返回 ErrDuplicate。
+func (s *Store) Insert(ctx context.Context, serverID int32, collection, key string, doc any) error {
+	_, err := s.coll(serverID, collection).InsertOne(ctx, doc)
+	if drv.IsDuplicateKeyError(err) {
+		return store.ErrDuplicate
+	}
 	return err
+}
+
+// EnsureUnique 为区服集合创建唯一索引。已存在的同名索引再次创建会成功返回。
+func (s *Store) EnsureUnique(ctx context.Context, serverID int32, collection, field string) error {
+	if field == "" {
+		return nil
+	}
+	_, err := s.coll(serverID, collection).Indexes().CreateOne(ctx, drv.IndexModel{
+		Keys:    bson.D{{Key: field, Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	return err
+}
+
+func versionFilter(id any, rev, fence uint64) bson.M {
+	return bson.M{
+		"_id": id,
+		"$and": []bson.M{
+			{"$or": []bson.M{
+				{"rev": bson.M{"$lte": rev}},
+				{"rev": bson.M{"$exists": false}},
+			}},
+			{"$or": []bson.M{
+				{"fence": bson.M{"$lte": fence}},
+				{"fence": bson.M{"$exists": false}},
+			}},
+		},
+	}
 }
 
 // Find 按字段查找。登录用名字，按业务编号读取用 id，两者都不是文档的 _id。
