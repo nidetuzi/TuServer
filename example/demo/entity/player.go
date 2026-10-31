@@ -22,6 +22,11 @@ type Player struct {
 	GuildID      int64              `bson:"guild_id"`
 	Rev          uint64             `bson:"rev,omitempty"`
 	Fence        uint64             `bson:"fence,omitempty"`
+	// LastOfflineAt 保存服务器确认离线的 Unix 秒，不把进程崩溃伪装成正常断线。
+	LastOfflineAt int64 `bson:"last_offline_at,omitempty"`
+	// LastLoginAt 保存最近一次成功上线的 Unix 秒，在线检查不修改登录时间。
+	LastLoginAt  int64 `bson:"last_login_at,omitempty"`
+	lastDayCheck int64
 }
 
 // Snapshot 是一次加锁读到的角色视图，回包和广播不要在锁外拆字段。
@@ -31,6 +36,10 @@ type Snapshot struct {
 	Level    int32
 	Exp      int32
 	GuildID  int64
+	// LastOfflineAt 供登录流程读取上次确认离线时间。
+	LastOfflineAt int64
+	// LastLoginAt 供业务读取最近一次成功上线时间。
+	LastLoginAt int64
 }
 
 // NewPlayer 创建 1 级角色。_id 在插入前生成，这样还没刷盘也能放进缓存。业务编号由存储的计数器另行分配。
@@ -84,7 +93,7 @@ func (p *Player) SetFence(term uint64) {
 func (p *Player) Snapshot() Snapshot {
 	p.Lock()
 	defer p.Unlock()
-	return Snapshot{PlayerID: p.PlayerID, Name: p.Name, Level: p.Level, Exp: p.Exp, GuildID: p.GuildID}
+	return Snapshot{PlayerID: p.PlayerID, Name: p.Name, Level: p.Level, Exp: p.Exp, GuildID: p.GuildID, LastOfflineAt: p.LastOfflineAt, LastLoginAt: p.LastLoginAt}
 }
 
 // Guild 返回角色当前公会编号。
@@ -170,6 +179,7 @@ func (p *Player) Persist() (uint64, any) {
 		doc = playerDoc{
 			OID: p.OID, PlayerID: p.PlayerID, Server: p.Server, Name: p.Name,
 			Level: p.Level, Exp: p.Exp, Bag: bag, GuildID: p.GuildID, Fence: p.Fence,
+			LastOfflineAt: p.LastOfflineAt, LastLoginAt: p.LastLoginAt,
 		}
 	})
 	doc.Rev = gen
@@ -185,16 +195,18 @@ func NeedExp(level int32) int32 {
 }
 
 type playerDoc struct {
-	OID      primitive.ObjectID `bson:"_id"`
-	PlayerID int64              `bson:"id"`
-	Server   int32              `bson:"server_id"`
-	Name     string             `bson:"name"`
-	Level    int32              `bson:"level"`
-	Exp      int32              `bson:"exp"`
-	Bag      map[int32]int32    `bson:"bag"`
-	GuildID  int64              `bson:"guild_id"`
-	Rev      uint64             `bson:"rev,omitempty"`
-	Fence    uint64             `bson:"fence,omitempty"`
+	OID           primitive.ObjectID `bson:"_id"`
+	PlayerID      int64              `bson:"id"`
+	Server        int32              `bson:"server_id"`
+	Name          string             `bson:"name"`
+	Level         int32              `bson:"level"`
+	Exp           int32              `bson:"exp"`
+	Bag           map[int32]int32    `bson:"bag"`
+	GuildID       int64              `bson:"guild_id"`
+	Rev           uint64             `bson:"rev,omitempty"`
+	Fence         uint64             `bson:"fence,omitempty"`
+	LastOfflineAt int64              `bson:"last_offline_at,omitempty"`
+	LastLoginAt   int64              `bson:"last_login_at,omitempty"`
 }
 
 // DocVersion 提供条件写使用的代数和任期。

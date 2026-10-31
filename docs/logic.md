@@ -40,7 +40,7 @@
 - `Request.Internal == true` 才处理内部命令：`CmdOwner`（0）在会话 actor 外调用 `Owners.Handle`；`CmdDisconnect`（-1）走断线；`CmdRelinquish`（-3）交出租约。其他协议号返回 `ErrInternalCmd`，不会掉进客户端路由。
 - 未配置 `Owners` 时，内部的 cmd 0 返回 `logic: owner runtime unavailable`，不会回落到普通路由。
 - `Sessions(serverID)`：返回本节点对应区服的会话值切片；遍历顺序不保证，只代表最近一次成功普通请求记录的状态。
-- `App.Stop()`：关闭 actor 邮箱，不等同于停止 Kitex、刷盘或等待所有 actor 退出。
+- `App.Stop()`：停止配置的业务调度并等待 actor 排空；不负责停止 Kitex 或最终刷盘。需要限制等待时间时调用 `App.Shutdown(ctx)`。
 
 ### 最小装配示例
 
@@ -144,9 +144,9 @@ func main() {
 
 `ChatService.Send` 先在玩家 actor 内读取角色、编码 `ChatPush`，再用独立协程 `NotifyAll`。每个 Logic 的 `logicAPI.NotifyServer` 用 `Sessions(serverID)` 筛选本节点在线会话，通过该会话的 Gate 地址回推。广播范围是区服，节点可以同时服务多个区服；内部公会请求不会污染在线表。
 
-刷盘不由 `App` 管理：`cmd/logic` 创建定时器，调用 `cache.Flush`；收到退出信号后再 Flush，然后 `app.Stop()`、`svr.Stop()`、关闭存储。实体修改由 service/事件调用 `MarkDirty`，不在 handler 逐次写库。新实体 `cache.Put` 已打脏。
+刷盘不由 `App` 管理：`cmd/logic` 通过独立的 `logic.Loops` 调用 `cache.Flush` 和淘汰。实体修改由 service/事件调用 `MarkDirty`，不在 handler 逐次写库。
 
-当前退出实现没有先停止接入、等待 actor 清空、再做最终刷盘的完整屏障，定时器也未显式取消。`Actor.Stop` 关闭 channel 后仍可能消费队列，不等待消费完；不要把退出前这次 Flush 理解成所有并发请求已完成后的持久化保证。
+收到退出信号后，`ShutdownSteps` 先停 Kitex 接入、停止并等待业务调度，再停基础循环、等待 actor 排空，最后执行最终 Flush。任何带错误返回的步骤失败时停止后续步骤，避免任务仍在修改实体就宣称刷盘完成。超时和进程强杀仍不构成持久化成功保证。
 
 ## 6. 错误与并发边界
 
@@ -158,7 +158,23 @@ func main() {
 - 会话表的锁只保护表本身，不应在业务添加角色互斥锁来替代 actor。现有实体局部锁用于与持久化快照协调，不能扩大理解成跨会话/跨节点事务。
 - 断线删除不经过同一个 actor，可能被仍在执行的成功请求重新登记；actor 不会随断线回收。会话标识没有 Gate 命名空间前缀，部署时还需关注全局唯一性。
 
-## 7. 扩展及测试依据
+## 7. 业务定时任务
+
+`pkg/scheduler` 使用 `github.com/robfig/cron/v3`，由 `cmd/logic` 创建、启动并赋给 `app.Scheduler`。它只负责本进程调度，不持久化、不补跑、不自动重试，也不保证多节点唯一执行。基础续租、刷盘和网关探测继续使用独立的 `logic.Loops`。
+
+配置位于 `config/logic.yaml` 的 `scheduler`：`timezone` 默认 `Asia/Shanghai`，`max_concurrent` 默认 64，`task_timeout` 默认 30 秒。非法时区、负数并发和非法或非正超时会拒绝启动。使用标准五字段表达式（如 `0 5 * * *`），秒级周期使用 `@every 30s`；不启用六字段秒表达式。
+
+节点任务调用 `tasks.Add(name, spec, func(context.Context) error)`；返回的 `Task.Cancel()` 可重复调用，旧句柄不会取消同名新任务。普通回调不会自动进入 actor，不允许直接修改实体。同一任务不重叠，总并发满时跳过当轮；panic 和业务错误通过 `pkg/log` 记录。`Entries()` 返回名称、规则、上次/下次触发时间、运行状态和跳过次数。超时和取消只通知回调退出，任务实际返回前仍占用执行配额。
+
+在线任务推荐在 `app.Hooks.OnOnline` 注册：新绑定完成后调用 `app.AddPlayerTask(session, name, spec, func(*handler.Context) error)`。回调进入现有角色邮箱，在邮箱内复核会话、任期与有效状态，复用租约续期、缓存 Guard 和 Loader，再调用 service 修改实体并 MarkDirty。注册只捕获编号、参数和会话身份，不捕获实体指针或请求 context。同一绑定的后续协议不重复触发 OnOnline；首次登录的新绑定可能仍处于登录会话邮箱，因此该 hook 只做注册，不能直接修改角色或同步等待 actor。
+
+断线、换会话、交出租约、失租和陈旧存档清理会取消对应任务；已取消的旧回调在执行前再次检查。业务 context 取消时不会让调度器提前释放仍在邮箱执行的任务；排队包装会在轮到时跳过已取消业务。不要在任务回调里同步调用自身调度器的 Shutdown 或 app.Stop，也不要在角色回调里同步等待同一 actor。
+
+停机顺序为：停接入 → `StopTasks` 等待业务任务 → 停基础循环 → 排空邮箱 → 最终刷盘。等待超时返回错误，不继续最终刷盘。`App.Shutdown` 本身也会先等待 Scheduler，以保护直接使用运行时的调用方。
+
+可运行接入示例见 `example/demo/scheduler_test.go`，在线经验奖励仅为示例，节点默认不注册奖励任务。覆盖依据为 `pkg/scheduler/scheduler_test.go`、`pkg/logic/scheduler_test.go`、`pkg/logic/shutdown_test.go` 和 `pkg/config/scheduler_test.go`。
+
+## 8. 扩展及测试依据
 
 新增玩法优先按 [路由与上下文](router-handler.md) 注册正数协议，handler 只做参数校验与组包，service 通过 `ctx.GetPlayer()` 读角色，修改实体后打脏；本地事件留在同次 actor 调用中。新增共享实体复用 `owner.Key`、`owner.Register` 与 `owner.Call`，返回纯 DTO，启动阶段注册操作，不自行复制一套主人判定/转发。`PlacementRouted` 本身不触发调用，也不允许业务绕过主人直接 Get 后修改。
 

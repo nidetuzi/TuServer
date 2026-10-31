@@ -32,7 +32,7 @@ type File struct {
 	FlushInterval string `yaml:"flush_interval"`
 	// RenewInterval 是在线角色续租间隔，应小于租约 TTL，并且不跟刷盘共用一个循环。
 	RenewInterval string `yaml:"renew_interval"`
-	IdleTimeout string `yaml:"idle_timeout"`
+	IdleTimeout   string `yaml:"idle_timeout"`
 	// GateTimeout 是 Gate 到 Logic 的单次 RPC 超时时间。
 	GateTimeout string `yaml:"gate_timeout"`
 	// GateProbeInterval 是对照注册中心网关列表的间隔。
@@ -45,7 +45,9 @@ type File struct {
 		MaxItems int    `yaml:"max_items"`
 		Idle     string `yaml:"idle"`
 	} `yaml:"cache"`
-	Log Log `yaml:"log"`
+	// Scheduler 单独配置业务调度，不改变续租和刷盘的基础循环。
+	Scheduler Scheduler `yaml:"scheduler"`
+	Log       Log       `yaml:"log"`
 }
 
 // Log 对应 pkg/log 的配置，单独列出是为了 yaml 名字和代码字段对齐。

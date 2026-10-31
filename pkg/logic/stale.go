@@ -22,6 +22,7 @@ func (a *App) PrepareStalePlayer(serverID int32, playerID int64, term uint64) fu
 		cur, still := a.bound[key]
 		if still && cur.ID == b.ID && cur.Term == b.Term && cur.GateAddr == b.GateAddr {
 			// 先封住后续协议，再等待异步清理，避免忘掉旧实体后又重新加载并继续修改。
+			a.cancelPlayerTasksLocked(key)
 			cur.invalid = true
 			a.bound[key] = cur
 		}
@@ -45,6 +46,7 @@ func (a *App) discardStaleInActor(ctx context.Context, b binding) {
 		a.mu.Unlock()
 		return
 	}
+	a.cancelPlayerTasksLocked(key)
 	delete(a.bound, key)
 	delete(a.sessions, b.ID)
 	a.mu.Unlock()

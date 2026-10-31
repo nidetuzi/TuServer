@@ -42,6 +42,18 @@
 
 此处仅按区服和名字识别角色，没有密码、token、账号归属、重登踢人或跨节点在线排他。两个会话可能操作同一缓存角色却使用不同邮箱；不能当作生产登录安全保证。
 
+### 3.1.1 登录跨天与在线检查
+
+`cmd/logic` 调用 `demo.BindPlayerLifecycle(app, players)` 装配上线、离线和在线任务。`players.WithDayClock(location, now)` 使用与 scheduler 相同的业务时区，默认上海时区，以当地零点分日，不按固定 24 小时间隔判断。
+
+角色仅持久化 `last_offline_at`（服务器确认离线时间）和 `last_login_at`（最近一次成功上线时间），均为 Unix 秒。`PlayerService.CheckNewDay` 比较登录、离线以及在线期间内存检查时间中最新的日期，首次登录不触发、跨多日只触发一次、同日不重复、时钟回拨不倒退检查基准。在线检查不修改登录或离线时间。`OnOnline` 先比较旧时间，再保存本次登录时间并打脏。跨天入口目前只记录日志，实际日常业务在此扩展，不额外保存日期或每日经验字段。
+
+初次登录完成名字解析后，框架离开会话邮箱，再进入角色邮箱申请租约，调用 `OnPlayerOnline` 执行跨天检查，成功才建立在线绑定。新绑定通过 `OnOnline` 注册 `@every 30s` 的 `new-day` 玩家任务，在角色邮箱内重复调用同一函数；因此零点通常在下一个检查周期处理，繁忙跳过后可补查。经验逻辑不再增加演示用日累计，跨天检测不改变等级、经验或背包。
+
+正常断线（包括框架确认网关失联后的断线清理）在角色邮箱中续原租约，调用 `OnPlayerOffline` 记录时间并打脏，然后刷盘、释放租约并取消任务。失租和陈旧存档清理不记录离线时间，避免无写权修改；进程崩溃无法记录精确离线时刻，下次登录用最近持久化的登录/离线时间补检查；内存防重基准不持久化，跨崩溃的业务副作用仍需自行保证幂等。单独调用 `PlayerService.Login` 只负责查找/创建，不执行上线生命周期；接业务应通过 App 并装配上述 hook。
+
+验证见 `entity/daily_test.go`、`lifecycle_test.go` 和 `pkg/logic/player_hooks_test.go`，覆盖同日/跨月/跨年、在线跨天、离线再登录、刷盘重载、回拨与初次登录 actor 串行。
+
 ### 3.2 加经验：1002 与同步奖励
 
 [`OnLevelUp`](../example/demo/handler/levelup.go) 接收 `LevelUpReq{Exp}`，handler 与 `PlayerService.AddExp` 都要求 `Exp > 0`。service 通过 `ctx.GetPlayer()` 得到 `*entity.Player`：

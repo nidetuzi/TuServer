@@ -22,6 +22,11 @@ gate_probe_interval: 5s
 gate_misses: 2
 # 一台失联网关同时清理的会话数。留空或非正数时为 8，避免几千个会话串行刷盘把探测拖住。
 gate_reap_parallel: 8
+# 业务任务独立限流；超时只通知回调退出，不会强制终止正在修改实体的代码。
+scheduler:
+  timezone: Asia/Shanghai
+  max_concurrent: 64
+  task_timeout: 30s
 log:
   level: info
   format: text

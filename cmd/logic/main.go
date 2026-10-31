@@ -24,6 +24,7 @@ import (
 	"tuserv/pkg/log"
 	"tuserv/pkg/logic"
 	"tuserv/pkg/router"
+	"tuserv/pkg/scheduler"
 	mongostore "tuserv/pkg/store/mongo"
 )
 
@@ -40,6 +41,16 @@ func main() {
 		panic(err)
 	}
 	log.BindKitex()
+	schedulerConfig, err := cfg.SchedulerConfig()
+	if err != nil {
+		log.Error("scheduler config", "err", err)
+		os.Exit(1)
+	}
+	tasks, err := scheduler.New(schedulerConfig)
+	if err != nil {
+		log.Error("scheduler init", "err", err)
+		os.Exit(1)
+	}
 	secret, err := cfg.ClusterKey()
 	if err != nil {
 		log.Error("cluster secret", "err", err)
@@ -68,10 +79,19 @@ func main() {
 		}
 		return nil
 	}))
-	players := service.NewPlayerService(c, store, bus)
+	dayLocation, err := time.LoadLocation(schedulerConfig.Timezone)
+	if schedulerConfig.Timezone == "" {
+		dayLocation, err = time.LoadLocation("Asia/Shanghai")
+	}
+	if err != nil {
+		log.Error("player day timezone", "err", err)
+		os.Exit(1)
+	}
+	players := service.NewPlayerService(c, store, bus).WithDayClock(dayLocation, time.Now)
 	chat := service.NewChatService(&notifyAll{nodes: nodes})
 	r := router.New[int32]()
 	app = logic.New(r, players.GetByID)
+	app.Scheduler = tasks
 	self := cfg.AdvertiseAddr
 	if self == "" {
 		self = cfg.ListenAddr
@@ -111,6 +131,7 @@ func main() {
 			return c.PinKey(serverID, "player", strconv.FormatInt(playerID, 10))
 		},
 	}
+	demo.BindPlayerLifecycle(app, players)
 	guilds := service.NewGuildService(c, store, owners)
 	if err := guilds.RegisterOwners(); err != nil {
 		log.Error("register owner operations", "err", err)
@@ -130,6 +151,10 @@ func main() {
 	}
 	svr := logiccli.NewServer(&logicAPI{app: app, nodes: nodes}, opts...)
 	app.ReapParallel = cfg.ReapParallel()
+	if err := tasks.Start(); err != nil {
+		log.Error("scheduler start", "err", err)
+		os.Exit(1)
+	}
 	stopTicker := make(chan struct{})
 	var tickerOnce sync.Once
 	tickerDone := make(chan struct{})
@@ -186,6 +211,7 @@ func main() {
 				return ctx.Err()
 			}
 		},
+		StopTasks: tasks.Shutdown,
 		StopTicker: func() {
 			tickerOnce.Do(func() { close(stopTicker) })
 			select {

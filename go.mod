@@ -9,6 +9,7 @@ require (
 	github.com/cloudwego/prutal v0.1.3
 	github.com/kitex-contrib/registry-etcd v0.3.0
 	github.com/lesismal/nbio v1.7.1
+	github.com/robfig/cron/v3 v3.0.1
 	go.mongodb.org/mongo-driver v1.17.10
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1

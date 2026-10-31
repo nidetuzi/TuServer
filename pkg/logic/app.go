@@ -16,6 +16,7 @@ import (
 	"tuserv/pkg/log"
 	"tuserv/pkg/owner"
 	"tuserv/pkg/router"
+	"tuserv/pkg/scheduler"
 	"tuserv/pkg/store"
 )
 
@@ -67,6 +68,12 @@ type binding struct {
 
 // Hooks 是角色单写和踢线用的节点能力。测试可以只填其中几项。
 type Hooks struct {
+	// OnOnline 在请求完成新绑定后调用，适合注册会话任务，不能同步回调当前 actor。
+	OnOnline func(Session)
+	// OnPlayerOnline 在持有写权的角色邮箱中执行新会话业务，先于注册在线任务；失败则不建立新绑定。
+	OnPlayerOnline func(*handler.Context) error
+	// OnPlayerOffline 在正常断线刷盘前执行，失租或陈旧清理不调用以免修改无写权的实体。
+	OnPlayerOffline func(*handler.Context) error
 	// Self 是本节点对外地址，租约持有者和它比较。
 	Self string
 	// Leases 保存跨节点任期。为空时只在本进程内按角色串行。
@@ -99,6 +106,9 @@ type App struct {
 	Actors *actor.System
 	Load   handler.Loader
 	Hooks  Hooks
+	// Scheduler 在服务接入前配置，业务任务必须先于邮箱停机。
+	Scheduler   *scheduler.Scheduler
+	playerTasks map[string]map[string]*scheduler.Task
 	// ReapParallel 限制一台失联网关同时清理多少条会话。小于 1 时用 DefaultReapParallel。
 	ReapParallel int
 
@@ -171,6 +181,30 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 	if biz != nil {
 		return clientError(req, biz), nil
 	}
+	if req.PlayerID == 0 && resp.PlayerID > 0 && req.SessionID != "" {
+		req.PlayerID = resp.PlayerID
+		var onlineErr error
+		if err := a.Actors.Do(ctx, playerActorKey(req.ServerID, req.PlayerID), func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					onlineErr = errPanic
+				}
+			}()
+			a.withGuard(func() {
+				term, err := a.enter(ctx, req)
+				if err != nil {
+					onlineErr = err
+					return
+				}
+				onlineErr = a.completeOnline(lease.WithTerm(ctx, term), req, term)
+			})
+		}); err != nil {
+			return Response{}, err
+		}
+		if onlineErr != nil {
+			return Response{}, onlineErr
+		}
+	}
 	return resp, nil
 }
 
@@ -181,6 +215,7 @@ func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, bi
 		a.kick(ctx, req.GateID, req.SessionID)
 		return
 	}
+	wasPlayer := req.PlayerID > 0
 	term := uint64(0)
 	if req.PlayerID > 0 {
 		var err error
@@ -206,18 +241,10 @@ func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, bi
 		*biz = dispatchErr
 		return
 	}
-	if term == 0 && hctx.PlayerID > 0 {
-		req.PlayerID = hctx.PlayerID
-		var err error
-		term, err = a.enter(ctx, req)
-		if err != nil {
-			*fatal = err
-			return
-		}
-	}
 	*resp = Response{PlayerID: hctx.PlayerID, CmdID: req.CmdID, Body: body}
-	if hctx.PlayerID > 0 && req.SessionID != "" {
-		a.bindOnline(ctx, req, hctx.PlayerID, term)
+	// 首次登录先离开会话邮箱，再由 Handle 进入角色邮箱申请写权并执行上线业务。
+	if hctx.PlayerID > 0 && req.SessionID != "" && wasPlayer {
+		*fatal = a.completeOnline(ctx, req, term)
 	}
 }
 
@@ -363,6 +390,7 @@ func (a *App) abandonLostInActor(ctx context.Context, b binding, held error) {
 		return
 	}
 	unpin := cur.unpin
+	a.cancelPlayerTasksLocked(key)
 	delete(a.bound, key)
 	delete(a.sessions, cur.ID)
 	a.mu.Unlock()
@@ -446,15 +474,18 @@ func (a *App) Sessions(serverID int32) []Session {
 	return out
 }
 
-// Stop 关闭 actor 邮箱并等已排队的任务结束。
+// Stop 先停止业务调度，再关闭 actor 邮箱并等已排队的任务结束。
 func (a *App) Stop() {
-	if a.Actors != nil {
-		a.Actors.Stop()
-	}
+	_ = a.Shutdown(context.Background())
 }
 
 // Shutdown 在超时内排空邮箱。停机时先停接入和定时器，再调用它，最后才刷盘。
 func (a *App) Shutdown(ctx context.Context) error {
+	if a.Scheduler != nil {
+		if err := a.Scheduler.Shutdown(ctx); err != nil {
+			return err
+		}
+	}
 	if a.Actors == nil {
 		return nil
 	}
@@ -510,12 +541,17 @@ func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term 
 		unpin = pinned
 		pinned = nil
 	}
+	changed := !exists || prev.Session != sess || prev.Term != term
+	if exists && changed {
+		a.cancelPlayerTasksLocked(key)
+	}
 	a.bound[key] = binding{Session: sess, Term: term, unpin: unpin, invalid: exists && prev.ID == sess.ID && prev.Term == term && prev.invalid}
 	for k, v := range a.bound {
 		if k != key && v.ID == req.SessionID {
 			if v.unpin != nil {
 				drop = append(drop, v.unpin)
 			}
+			a.cancelPlayerTasksLocked(k)
 			delete(a.bound, k)
 		}
 	}
@@ -532,6 +568,9 @@ func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term 
 	if kickOld {
 		a.Actors.Retire("session/" + prev.ID)
 		a.kick(ctx, prev.GateAddr, prev.ID)
+	}
+	if changed && a.Hooks.OnOnline != nil {
+		a.Hooks.OnOnline(sess)
 	}
 }
 
@@ -553,7 +592,8 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 			return nil
 		}
 	}
-	return a.Actors.Do(ctx, playerActorKey(req.ServerID, req.PlayerID), func() {
+	var offlineErr error
+	runErr := a.Actors.Do(ctx, playerActorKey(req.ServerID, req.PlayerID), func() {
 		a.withGuard(func() {
 			key := playerActorKey(req.ServerID, req.PlayerID)
 			a.mu.Lock()
@@ -567,6 +607,10 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 				}
 				return
 			}
+			if err := a.beforePlayerOffline(ctx, req); err != nil {
+				offlineErr = err
+				return
+			}
 			if a.Hooks.FlushID != nil {
 				_ = a.Hooks.FlushID(ctx, req.ServerID, "player", req.PlayerID)
 			}
@@ -577,6 +621,7 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 			a.mu.Lock()
 			if cur, still := a.bound[key]; still && cur.ID == req.SessionID && (req.GateID == "" || cur.GateAddr == req.GateID) {
 				unpin = cur.unpin
+				a.cancelPlayerTasksLocked(key)
 				delete(a.bound, key)
 			}
 			if req.GateID == "" {
@@ -591,6 +636,10 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 			}
 		})
 	})
+	if runErr != nil {
+		return runErr
+	}
+	return offlineErr
 }
 
 func (a *App) dropGate(ctx context.Context, gateAddr string) {
@@ -777,6 +826,7 @@ func (a *App) relinquish(ctx context.Context, body []byte) error {
 			var unpin func()
 			if ok {
 				unpin = b.unpin
+				a.cancelPlayerTasksLocked(key)
 				delete(a.bound, key)
 				delete(a.sessions, b.ID)
 			}

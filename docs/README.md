@@ -25,6 +25,7 @@
 - [Actor](actor.md)：`pkg/actor`；串行邮箱、同步等待、上下文取消及停止语义。
 - [Router / Handler](router-handler.md)：`pkg/router` 与 `pkg/handler`；泛型路由、protobuf 编解码、请求上下文和角色读取。
 - [Event](event.md)：`pkg/event`；按类型匹配的同步进程内事件。
+- [业务定时任务](logic.md#7-业务定时任务)：`pkg/scheduler`；cron 周期调度、在线玩家任务、取消与停机。
 - [Entity](entity.md)：`pkg/entity`；ObjectID、业务编号、放置声明、脏代数和快照契约。
 - [Cache](cache.md)：`pkg/cache`；按区服缓存、别名、Get 未命中加载与 Flush。
 - [Store](store.md)：`pkg/store`、`memory`、`mongo`；存储接口、分库、编号分配和测试替身。

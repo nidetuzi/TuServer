@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"tuserv/example/demo/entity"
 	"tuserv/example/demo/event"
@@ -21,15 +22,17 @@ type Publisher interface {
 
 // PlayerService 负责角色的创建、读取和升级。
 type PlayerService struct {
-	cache *cache.Cache
-	store store.Store
-	bus   Publisher
-	ready sync.Map
+	cache    *cache.Cache
+	store    store.Store
+	bus      Publisher
+	ready    sync.Map
+	now      func() time.Time
+	location *time.Location
 }
 
 // NewPlayerService 创建角色服务。自增号从存储的计数器取，0 仍然表示会话还没登录。
 func NewPlayerService(c *cache.Cache, st store.Store, bus Publisher) *PlayerService {
-	return &PlayerService{cache: c, store: st, bus: bus}
+	return &PlayerService{cache: c, store: st, bus: bus, now: time.Now, location: time.FixedZone("Asia/Shanghai", 8*60*60)}
 }
 
 // Login 按区服和名字取得角色，没有则创建。未命中时由缓存内部读库，业务不调用 Load。
