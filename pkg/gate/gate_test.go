@@ -149,3 +149,39 @@ func TestOnPacketForwardsPositiveAndCloseIsInternal(t *testing.T) {
 		t.Fatalf("非法帧之后不应再回包: wrote=%d", p.wrote)
 	}
 }
+
+type recordFwd struct {
+	picks int
+	reqs  []logic.Request
+}
+
+func (f *recordFwd) Pick(context.Context) (cluster.Instance, error) {
+	f.picks++
+	return cluster.Instance{Addr: "127.0.0.1:9101", Weight: 1}, nil
+}
+
+func (f *recordFwd) Dispatch(_ context.Context, _ string, req logic.Request) (logic.Response, error) {
+	f.reqs = append(f.reqs, req)
+	return logic.Response{CmdID: req.CmdID}, nil
+}
+
+func TestHeartbeatStaysOnGate(t *testing.T) {
+	fwd := &recordFwd{}
+	g := New("127.0.0.1:9001", fwd, nil)
+	p := &fakePeer{id: "1"}
+	g.OnOpen(p)
+	g.OnPacket(p, protocol.Packet{CmdID: protocol.CmdHeartbeat, ServerID: 9, Body: []byte{1}})
+	if fwd.picks != 0 || len(fwd.reqs) != 0 {
+		t.Fatalf("心跳不应选点或转发: picks=%d reqs=%d", fwd.picks, len(fwd.reqs))
+	}
+	if p.closed || p.wrote != 1 || p.last.CmdID != protocol.CmdHeartbeat || p.last.ServerID != 9 || len(p.last.Body) != 0 {
+		t.Fatalf("心跳应原样应答空包: %+v", p)
+	}
+	if s := g.session("1"); s.serverID != 0 || s.logicAddr != "" || s.dead {
+		t.Fatalf("心跳不应改会话绑定: %+v", s)
+	}
+	g.OnPacket(p, protocol.Packet{CmdID: 0, ServerID: 9})
+	if !p.closed || len(fwd.reqs) != 0 {
+		t.Fatal("心跳之后的非正协议号仍应关连接且不转发")
+	}
+}

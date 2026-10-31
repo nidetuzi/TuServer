@@ -62,23 +62,24 @@ func main() {
 			klog.Errorf("gate kitex: %v", err)
 		}
 	}()
+	idle := cfg.ClientIdle()
 	var tcpSrv *tcp.Server
 	var wsSrv *ws.Server
 	if cfg.TCPAddr != "" {
-		tcpSrv, err = tcp.Serve(cfg.TCPAddr, protocol.FrameCodec{}, g)
+		tcpSrv, err = tcp.Serve(cfg.TCPAddr, protocol.FrameCodec{}, g, idle)
 		if err != nil {
 			log.Error("tcp serve", "err", err)
 			os.Exit(1)
 		}
-		log.Info("tcp listen", "addr", cfg.TCPAddr)
+		log.Info("tcp listen", "addr", cfg.TCPAddr, "idle", idle.String())
 	}
 	if cfg.WSAddr != "" {
-		wsSrv, err = ws.Serve(cfg.WSAddr, protocol.FrameCodec{}, g)
+		wsSrv, err = ws.Serve(cfg.WSAddr, protocol.FrameCodec{}, g, idle)
 		if err != nil {
 			log.Error("ws serve", "err", err)
 			os.Exit(1)
 		}
-		log.Info("ws listen", "addr", cfg.WSAddr)
+		log.Info("ws listen", "addr", cfg.WSAddr, "idle", idle.String())
 	}
 	wait()
 	if tcpSrv != nil {

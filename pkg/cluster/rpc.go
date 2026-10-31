@@ -154,6 +154,30 @@ func (n *Nodes) NotifyAll(ctx context.Context, serverID, cmdID int32, body []byt
 	return first
 }
 
+// Gates 返回当前仍注册着的网关地址。
+// 注册中心明确没有 Gate 时返回空列表，逻辑节点才能把挂在已消失网关上的会话清掉。
+// 查询本身失败时返回错误，调用方必须跳过本轮，避免把注册中心故障当成网关全灭。
+func (n *Nodes) Gates(ctx context.Context) ([]string, error) {
+	list, err := n.List(ctx, "Gate")
+	if err != nil {
+		if noInstance(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]string, 0, len(list))
+	for _, inst := range list {
+		if inst.Addr != "" {
+			out = append(out, inst.Addr)
+		}
+	}
+	return out, nil
+}
+
+func noInstance(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no instance remains")
+}
+
 // List 读取某个服务的全部实例和权重。
 func (n *Nodes) List(ctx context.Context, service string) ([]Instance, error) {
 	res, err := n.resolver.Resolve(ctx, service)

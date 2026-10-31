@@ -28,7 +28,10 @@ type File struct {
 		URI      string `yaml:"uri"`
 		DBPrefix string `yaml:"db_prefix"`
 	} `yaml:"mongo"`
-	FlushInterval string `yaml:"flush_interval"`
+	FlushInterval     string `yaml:"flush_interval"`
+	IdleTimeout       string `yaml:"idle_timeout"`
+	GateProbeInterval string `yaml:"gate_probe_interval"`
+	GateMisses        int    `yaml:"gate_misses"`
 	// Cache 控制逻辑节点内存里的实体数量。两项都留空或为 0 时不淘汰。
 	Cache struct {
 		MaxItems int    `yaml:"max_items"`
@@ -116,4 +119,42 @@ func (f File) FlushEvery() time.Duration {
 		return time.Second
 	}
 	return d
+}
+
+// ClientIdle 是客户端读空闲上限。留空按 60 秒，让没配心跳的进程也会收掉半开连接。
+// 显式写成 0 或负数表示关闭，非法字符串退回默认值，避免配错之后连接永远不超时。
+func (f File) ClientIdle() time.Duration {
+	if f.IdleTimeout == "" {
+		return 60 * time.Second
+	}
+	d, err := time.ParseDuration(f.IdleTimeout)
+	if err != nil {
+		return 60 * time.Second
+	}
+	if d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// GateProbeEvery 是逻辑节点对照注册中心网关列表的间隔。
+// 留空、非法或非正数都按 5 秒，和 etcd 注册租约同一量级，崩溃后不必等一整分钟。
+func (f File) GateProbeEvery() time.Duration {
+	if f.GateProbeInterval == "" {
+		return 5 * time.Second
+	}
+	d, err := time.ParseDuration(f.GateProbeInterval)
+	if err != nil || d <= 0 {
+		return 5 * time.Second
+	}
+	return d
+}
+
+// GateMissLimit 是网关地址连续缺席多少次才清理会话。
+// 小于等于 0 按 2 次，单次发现抖动不会把还活着的网关上的角色踢掉。
+func (f File) GateMissLimit() int {
+	if f.GateMisses <= 0 {
+		return 2
+	}
+	return f.GateMisses
 }

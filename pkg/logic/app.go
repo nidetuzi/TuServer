@@ -92,6 +92,8 @@ type App struct {
 	mu       sync.Mutex
 	sessions map[string]Session
 	bound    map[string]binding
+	// gateMiss 记录网关地址连续缺席的发现次数。回到列表里就清零，避免一次抖动误踢。
+	gateMiss map[string]int
 	// Owners 在实体自己的邮箱中处理内部调用，不能先进入会话邮箱再等待自己。
 	Owners *owner.Runtime
 }
@@ -104,6 +106,7 @@ func New(r *router.Router[int32], load handler.Loader) *App {
 		Load:     load,
 		sessions: make(map[string]Session),
 		bound:    make(map[string]binding),
+		gateMiss: make(map[string]int),
 	}
 }
 
@@ -240,10 +243,71 @@ func (a *App) RenewLeases(ctx context.Context) {
 		if err != nil {
 			continue
 		}
+		key := playerActorKey(b.ServerID, b.PlayerID)
 		a.mu.Lock()
-		if cur, ok := a.bound[playerActorKey(b.ServerID, b.PlayerID)]; ok && cur.ID == b.ID {
+		cur, ok := a.bound[key]
+		if ok && cur.ID == b.ID {
 			cur.Term = term
-			a.bound[playerActorKey(b.ServerID, b.PlayerID)] = cur
+			a.bound[key] = cur
+			ok = true
+		} else {
+			ok = false
+		}
+		a.mu.Unlock()
+		if ok || a.Hooks.Leases == nil || term == 0 {
+			continue
+		}
+		// 断线或死网关已经删掉绑定。enter 可能刚把租约又续上，按同一任期还回去，避免角色被空会话占着。
+		_ = lease.Release(ctx, a.Hooks.Leases, b.ServerID, playerLeaseKey(b.ServerID, b.PlayerID), a.Hooks.Self, term)
+	}
+}
+
+// ReapGates 按本轮仍注册着的网关地址清理失联会话。
+// alive 必须来自一次成功的发现；空列表表示当前没有任何网关。发现失败时不要调用，否则会把注册中心故障当成网关全灭。
+// 同一地址要连续缺席 miss 次才清理，避免一次列表抖动把在线角色全部踢掉。
+// 清理进入该角色自己的邮箱，先刷盘再释放租约，和客户端断线同一条路，避免脏数据留在内存里。
+func (a *App) ReapGates(ctx context.Context, alive []string, miss int) {
+	if miss < 1 {
+		miss = 1
+	}
+	live := make(map[string]struct{}, len(alive))
+	for _, addr := range alive {
+		if addr != "" {
+			live[addr] = struct{}{}
+		}
+	}
+	a.mu.Lock()
+	present := make(map[string]struct{})
+	var gone []string
+	for _, s := range a.sessions {
+		if s.GateAddr == "" {
+			continue
+		}
+		if _, ok := present[s.GateAddr]; ok {
+			continue
+		}
+		present[s.GateAddr] = struct{}{}
+		if _, ok := live[s.GateAddr]; ok {
+			delete(a.gateMiss, s.GateAddr)
+			continue
+		}
+		n := a.gateMiss[s.GateAddr] + 1
+		a.gateMiss[s.GateAddr] = n
+		if n >= miss {
+			gone = append(gone, s.GateAddr)
+		}
+	}
+	for addr := range a.gateMiss {
+		if _, ok := present[addr]; !ok {
+			delete(a.gateMiss, addr)
+		}
+	}
+	a.mu.Unlock()
+	for _, addr := range gone {
+		a.dropGate(ctx, addr)
+		a.mu.Lock()
+		if !a.hasGateLocked(addr) {
+			delete(a.gateMiss, addr)
 		}
 		a.mu.Unlock()
 	}
@@ -345,6 +409,9 @@ func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term 
 
 func (a *App) onDisconnect(ctx context.Context, req Request) error {
 	if req.PlayerID <= 0 {
+		if req.GateID != "" && !a.onGate(req.SessionID, req.GateID) {
+			return nil
+		}
 		a.dropSession(req.SessionID)
 		return nil
 	}
@@ -354,8 +421,12 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 			a.mu.Lock()
 			b, ok := a.bound[key]
 			a.mu.Unlock()
-			if !ok || b.ID != req.SessionID {
-				a.dropSession(req.SessionID)
+			// 带了网关地址却已经换到别的网关时，不能刷掉新会话，也不能放开还在用的缓存钉住。
+			moved := ok && b.ID == req.SessionID && req.GateID != "" && b.GateAddr != req.GateID
+			if !ok || b.ID != req.SessionID || moved {
+				if req.GateID == "" || a.onGate(req.SessionID, req.GateID) {
+					a.dropSession(req.SessionID)
+				}
 				return
 			}
 			if a.Hooks.FlushID != nil {
@@ -366,11 +437,15 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 			}
 			var unpin func()
 			a.mu.Lock()
-			if cur, still := a.bound[key]; still && cur.ID == req.SessionID {
+			if cur, still := a.bound[key]; still && cur.ID == req.SessionID && (req.GateID == "" || cur.GateAddr == req.GateID) {
 				unpin = cur.unpin
 				delete(a.bound, key)
 			}
-			delete(a.sessions, req.SessionID)
+			if req.GateID == "" {
+				delete(a.sessions, req.SessionID)
+			} else if s, still := a.sessions[req.SessionID]; still && s.GateAddr == req.GateID {
+				delete(a.sessions, req.SessionID)
+			}
 			a.mu.Unlock()
 			// 刷盘和 Forget 完成后再放开。提前放开的话，淘汰会和这次交接抢同一份脏数据。
 			if unpin != nil {
@@ -378,6 +453,48 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 			}
 		})
 	})
+}
+
+func (a *App) dropGate(ctx context.Context, gateAddr string) {
+	a.mu.Lock()
+	list := make([]Session, 0)
+	for _, s := range a.sessions {
+		if s.GateAddr == gateAddr {
+			list = append(list, s)
+		}
+	}
+	a.mu.Unlock()
+	if len(list) == 0 {
+		return
+	}
+	log.Info("gate offline", "gate", gateAddr, "sessions", len(list))
+	for _, s := range list {
+		// 必须走内部断线。不带 Internal 时负数协议号会被当成客户端非法帧，会话和缓存钉住都留着。
+		_, _ = a.Handle(ctx, Request{
+			GateID:    gateAddr,
+			SessionID: s.ID,
+			ServerID:  s.ServerID,
+			PlayerID:  s.PlayerID,
+			CmdID:     CmdDisconnect,
+			Internal:  true,
+		})
+	}
+}
+
+func (a *App) onGate(id, gate string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, ok := a.sessions[id]
+	return ok && s.GateAddr == gate
+}
+
+func (a *App) hasGateLocked(gate string) bool {
+	for _, s := range a.sessions {
+		if s.GateAddr == gate {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) dropSession(id string) {

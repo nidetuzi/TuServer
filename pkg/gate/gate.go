@@ -52,10 +52,17 @@ func (g *Gate) OnOpen(p protocol.Peer) {
 }
 
 // OnPacket 在会话协程里运行。第一次按权重选节点，失败时清掉地址再选一次。
-// 非正协议号直接丢掉并关掉连接。断线和主人调用不走客户端帧。
+// 心跳在本地应答。非正协议号直接丢掉并关掉连接。断线和主人调用不走客户端帧。
 func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 	s := g.session(p.ID())
 	if s == nil || s.dead {
+		return
+	}
+	if pkt.CmdID == protocol.CmdHeartbeat {
+		// 探活只证明连接还在，不能拿去选节点或改 serverId，否则空心跳会把已绑定的区服冲掉。
+		if err := p.WritePacket(protocol.Packet{CmdID: protocol.CmdHeartbeat, ServerID: pkt.ServerID}); err != nil {
+			log.Warn("heartbeat", "err", err, "session_id", p.ID())
+		}
 		return
 	}
 	if pkt.CmdID <= 0 {

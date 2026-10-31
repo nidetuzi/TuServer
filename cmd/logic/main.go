@@ -125,15 +125,19 @@ func main() {
 	stopTicker := make(chan struct{})
 	var tickerOnce sync.Once
 	tickerDone := make(chan struct{})
+	probeEvery := cfg.GateProbeEvery()
+	misses := cfg.GateMissLimit()
 	go func() {
 		defer close(tickerDone)
-		t := time.NewTicker(cfg.FlushEvery())
-		defer t.Stop()
+		flushTick := time.NewTicker(cfg.FlushEvery())
+		probeTick := time.NewTicker(probeEvery)
+		defer flushTick.Stop()
+		defer probeTick.Stop()
 		for {
 			select {
 			case <-stopTicker:
 				return
-			case <-t.C:
+			case <-flushTick.C:
 				app.RenewLeases(context.Background())
 				if err := c.Flush(context.Background()); err != nil {
 					log.Error("flush failed", "err", err)
@@ -141,6 +145,15 @@ func main() {
 				if err := c.Evict(context.Background()); err != nil {
 					log.Error("evict failed", "err", err)
 				}
+			case <-probeTick.C:
+				ctx, cancel := context.WithTimeout(context.Background(), probeEvery)
+				addrs, err := nodes.Gates(ctx)
+				cancel()
+				if err != nil {
+					log.Warn("gate probe", "err", err)
+					continue
+				}
+				app.ReapGates(context.Background(), addrs, misses)
 			}
 		}
 	}()

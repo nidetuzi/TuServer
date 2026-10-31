@@ -14,6 +14,11 @@ const (
 	metaSize   = cmdSize + serverSize
 )
 
+// CmdHeartbeat 是客户端与网关的探活帧。
+// 玩法协议从 1001 起；这里占用 1，是为了和 Logic 的负号内部帧、cmd 0 的主人调用错开。
+// 网关就地应答，不转发给逻辑节点，避免空闲连接把角色邮箱和租约一直续着。
+const CmdHeartbeat int32 = 1
+
 // ErrShortBuffer 表示缓冲里还不够一帧，调用方应继续等待后续字节。
 var ErrShortBuffer = errors.New("protocol: short buffer")
 

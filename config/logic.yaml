@@ -14,6 +14,9 @@ flush_interval: 1s
 cache:
   max_items: 20000
   idle: 10m
+# 对照 etcd 里的 Gate。连续缺席 gate_misses 次后，按断线流程清掉挂在该网关上的会话。
+gate_probe_interval: 5s
+gate_misses: 2
 log:
   level: info
   format: text

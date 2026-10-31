@@ -1,9 +1,11 @@
 package tcp
 
 import (
+	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lesismal/nbio"
 
@@ -16,6 +18,8 @@ type Server struct {
 	engine *nbio.Engine
 	codec  protocol.Codec
 	handle protocol.Handler
+	idle   time.Duration
+	addr   string
 	seq    atomic.Uint64
 }
 
@@ -29,14 +33,17 @@ type tcpPeer struct {
 }
 
 // Serve 开始监听。调用方在进程退出时 Stop。
-func Serve(addr string, codec protocol.Codec, handle protocol.Handler) (*Server, error) {
+// idle 是读空闲上限：这段时间没有任何入站字节就断开，用来收掉 TCP 没发 FIN 的死连接。
+// idle 小于等于 0 表示不启用，测试和显式关闭时用。
+func Serve(addr string, codec protocol.Codec, handle protocol.Handler, idle time.Duration) (*Server, error) {
 	if codec == nil {
 		codec = protocol.FrameCodec{}
 	}
-	s := &Server{codec: codec, handle: handle}
+	s := &Server{codec: codec, handle: handle, idle: idle}
 	engine := nbio.NewEngine(nbio.Config{
 		Network: "tcp",
 		Addrs:   []string{addr},
+		Listen:  s.listen,
 	})
 	engine.OnOpen(s.onOpen)
 	engine.OnData(s.onData)
@@ -55,6 +62,26 @@ func (s *Server) Stop() {
 	}
 }
 
+// Addr 返回实际监听地址。端口写 0 时用它拿到系统分配的端口。
+func (s *Server) Addr() string { return s.addr }
+
+func (s *Server) listen(network, addr string) (net.Listener, error) {
+	ln, err := net.Listen(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	s.addr = ln.Addr().String()
+	return ln, nil
+}
+
+func (s *Server) armRead(c *nbio.Conn) {
+	if s.idle <= 0 {
+		return
+	}
+	// 每次有入站字节都把截止时间往后推。到期仍没有字节，nbio 会关掉连接并走 OnClose。
+	_ = c.SetReadDeadline(time.Now().Add(s.idle))
+}
+
 func (s *Server) onOpen(c *nbio.Conn) {
 	p := &tcpPeer{
 		id:   strconv.FormatUint(s.seq.Add(1), 10),
@@ -64,6 +91,7 @@ func (s *Server) onOpen(c *nbio.Conn) {
 		q:    make(chan protocol.Packet, 128),
 	}
 	c.SetSession(p)
+	s.armRead(c)
 	go p.loop(s.handle)
 	if s.handle != nil {
 		s.handle.OnOpen(p)
@@ -76,6 +104,7 @@ func (s *Server) onData(c *nbio.Conn, data []byte) {
 	if !ok || p == nil {
 		return
 	}
+	s.armRead(c)
 	// nbio 会复用 data，必须先拷贝再交给拆包器。
 	raw := append([]byte(nil), data...)
 	pkts, err := p.asm.Push(raw)

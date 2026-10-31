@@ -1,10 +1,13 @@
 package ws
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lesismal/nbio/nbhttp"
 	"github.com/lesismal/nbio/nbhttp/websocket"
@@ -18,6 +21,8 @@ type Server struct {
 	engine *nbhttp.Engine
 	codec  protocol.Codec
 	handle protocol.Handler
+	idle   time.Duration
+	addr   string
 	seq    atomic.Uint64
 }
 
@@ -30,12 +35,15 @@ type wsPeer struct {
 }
 
 // Serve 在 addr 上提供 /ws。客户端用二进制消息发送与 TCP 相同的帧。
-func Serve(addr string, codec protocol.Codec, handle protocol.Handler) (*Server, error) {
+// idle 是读空闲上限，TCP 和 WebSocket 用同一个配置。小于等于 0 时关掉库自带的 120 秒保活，避免没配超时却偷偷断开。
+func Serve(addr string, codec protocol.Codec, handle protocol.Handler, idle time.Duration) (*Server, error) {
 	if codec == nil {
 		codec = protocol.FrameCodec{}
 	}
-	s := &Server{codec: codec, handle: handle}
+	s := &Server{codec: codec, handle: handle, idle: idle}
 	upgrader := websocket.NewUpgrader()
+	// KeepaliveTime 会在收到每条消息后重设读截止时间，半开连接到期由 nbio 关闭。
+	upgrader.KeepaliveTime = idle
 	upgrader.OnOpen(func(c *websocket.Conn) {
 		p := &wsPeer{
 			id:   strconv.FormatUint(s.seq.Add(1), 10),
@@ -90,6 +98,7 @@ func Serve(addr string, codec protocol.Codec, handle protocol.Handler) (*Server,
 		Network: "tcp",
 		Addrs:   []string{addr},
 		Handler: mux,
+		Listen:  s.listen,
 	})
 	if err := engine.Start(); err != nil {
 		return nil, err
@@ -99,10 +108,26 @@ func Serve(addr string, codec protocol.Codec, handle protocol.Handler) (*Server,
 }
 
 // Stop 停止 WebSocket 监听。
+// 必须带上截止时间：nbhttp 在 ctx 为空时会直接解引用，进程退出就会 panic。
 func (s *Server) Stop() {
-	if s.engine != nil {
-		_ = s.engine.Shutdown(nil)
+	if s.engine == nil {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = s.engine.Shutdown(ctx)
+}
+
+// Addr 返回实际监听地址。端口写 0 时用它拿到系统分配的端口。
+func (s *Server) Addr() string { return s.addr }
+
+func (s *Server) listen(network, addr string) (net.Listener, error) {
+	ln, err := net.Listen(network, addr)
+	if err != nil {
+		return nil, err
+	}
+	s.addr = ln.Addr().String()
+	return ln, nil
 }
 
 // ID 在网关会话表里标识这条连接。
