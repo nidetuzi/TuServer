@@ -120,6 +120,7 @@ func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 }
 
 // OnClose 通知逻辑节点丢掉这条会话，避免区服广播继续推给已断开的连接。
+// 传输层会等这条连接上的 OnPacket 都返回后再调用，因此这里的 playerID 和 logicAddr 已经是最后一次回包写回的值。
 func (g *Gate) OnClose(p protocol.Peer, _ error) {
 	s := g.drop(p.ID())
 	if s == nil || s.logicAddr == "" {

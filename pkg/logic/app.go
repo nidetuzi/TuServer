@@ -422,8 +422,15 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 		if req.GateID != "" && !a.onGate(req.SessionID, req.GateID) {
 			return nil
 		}
-		a.dropSession(req.SessionID)
-		return nil
+		// 登录回包还没把 playerID 写回网关时连接已经断了，通知里会是 0。
+		// 角色可能已经绑在这条 session 上，只删会话会把租约和缓存钉住留到被续租永久占住。
+		if serverID, playerID, ok := a.boundPlayer(req.SessionID); ok {
+			req.ServerID = serverID
+			req.PlayerID = playerID
+		} else {
+			a.dropSession(req.SessionID)
+			return nil
+		}
 	}
 	return a.Actors.Do(ctx, playerActorKey(req.ServerID, req.PlayerID), func() {
 		a.withGuard(func() {
@@ -489,6 +496,24 @@ func (a *App) dropGate(ctx context.Context, gateAddr string) {
 			Internal:  true,
 		})
 	}
+}
+
+// boundPlayer 按连接编号反查已经登录的角色。会话表和绑定是一起写上的，对不上就当没有。
+func (a *App) boundPlayer(sessionID string) (serverID int32, playerID int64, ok bool) {
+	if sessionID == "" {
+		return 0, 0, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, found := a.sessions[sessionID]
+	if !found || s.PlayerID <= 0 {
+		return 0, 0, false
+	}
+	b, found := a.bound[playerActorKey(s.ServerID, s.PlayerID)]
+	if !found || b.ID != sessionID || b.PlayerID <= 0 {
+		return 0, 0, false
+	}
+	return b.ServerID, b.PlayerID, true
 }
 
 func (a *App) onGate(id, gate string) bool {
