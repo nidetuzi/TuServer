@@ -43,12 +43,14 @@
 
 ### 创建客户端与注册服务
 
-- `Dial(endpoints) (*Nodes, error)`：创建 resolver、Logic/Gate 客户端；初始化错误直接返回。返回成功不应作为所有服务已就绪的业务保证。
+- `Dial(endpoints, secret) (*Nodes, error)`：创建 resolver、Logic/Gate 客户端，并给每次调用带上 HMAC。`secret` 为空时直接返回，不会去连 etcd。返回成功不应作为所有服务已就绪的业务保证。
 - `NewRegistry(endpoints)`：创建 etcd registry。
-- `ServerOptions(cfg, reg)`：解析 TCP 监听地址及对外注册地址，设置服务名和注册权重；解析地址失败则返回错误。
+- `ServerOptions(cfg, reg)`：解析 TCP 监听地址及对外注册地址，设置服务名、注册权重和验签中间件。密钥缺失或地址无法解析时返回错误。监听地址是通配（`:port` 或 `0.0.0.0`）时只告警，仍按配置监听。
 - `List(ctx, service)`：直接调用 resolver，将每个实例转换为 `Instance{Addr, Weight}`；不在本层过滤、去重或排序。
 
-`ServerOptions` 使用 `cfg.ListenAddr` 监听，`cfg.AdvertiseAddr` 非空时用它注册，否则使用监听地址；设置 `SkipListenAddr: true` 防止注册地址被监听地址覆盖。生产环境必须公布其他节点可连接的地址，不能误用通配地址或仅本机可用地址。注册权重小于等于 0 时会被改成 **10**，因此不能通过本函数把 `weight: 0` 当成摘流开关。
+`ServerOptions` 使用 `cfg.ListenAddr` 监听，`cfg.AdvertiseAddr` 非空时用它注册，否则使用监听地址；设置 `SkipListenAddr: true` 防止注册地址被监听地址覆盖。示例默认只绑 `127.0.0.1`。多机部署要写成其他节点能连上的具体地址，不要用通配地址，也不要在跨机器时用回环地址。注册权重小于等于 0 时会被改成 **10**，因此不能通过本函数把 `weight: 0` 当成摘流开关。
+
+节点间 `Dispatch`、`NotifyServer`、`Push`、`Ping` 在进入业务前校验 HMAC-SHA256。签名覆盖时间戳、是否内部调用和方法名，允许约 5 分钟时钟偏差。内部命令的 `Request.Internal` 由验签后的标记决定，不写进客户端帧，也不靠 `gate_id` 字符串。缺密钥时进程拒绝启动。相同请求在时间窗内可以被重放。
 
 `Dial` 和 `NewRegistry` 都会检查进程环境变量 `KITEX_ETCD_REGISTRY_LEASE_TTL`：仅在为空时设为字符串 `5`，否则保留原值。它配置 registry 的默认租约 TTL，不代表节点故障后精确 5 秒完成所有发现缓存更新，也不代表自动迁移已有绑定。
 
@@ -57,7 +59,7 @@
 ```yaml
 service_name: Logic
 weight: 10
-listen_addr: :9101
+listen_addr: 127.0.0.1:9101
 advertise_addr: 127.0.0.1:9101
 etcd:
   endpoints:
@@ -73,7 +75,7 @@ etcd:
 - `Owner(list, key)`：复制列表，按地址字符串排序，计算键的 FNV-1a 32 位哈希，使用 `hash % 实例数` 选中实例；空列表返回 `ErrNoInstance`。
 - `Owner` **不看权重**，零/负权重实例也可能成为主人。它只是相同列表与键下的稳定选择，不是一致性哈希；列表增删会重映射键，也没有数据搬迁或双主防护。
 
-当前 `cmd/logic/owner.go` 为 `owner.Runtime` 注入 `List("Logic")` 与 `Owner(list, key.String())`。本地和远端调用都进入 `owner/<区服>/<种类>/<编号>` 实体邮箱；远端通过 `CmdID: 0` 的 `Dispatch` 传递 owner JSON 请求，不再依赖 `SessionID` 承载实体键，也没有新增玩法专用 Kitex 方法。发现失败或空列表直接报错，不回退本地。接收端在实体邮箱内重新选主，主人改变返回 `owner.moved`，不会继续转发；这些检查仍不提供发现视图分裂下的分布式锁或双主防护，详见 [owner 文档](owner.md)。
+当前 `cmd/logic/owner.go` 为 `owner.Runtime` 注入 `List("Logic")` 与 `Owner(list, key.String())`。本地和远端调用都进入 `owner/<区服>/<种类>/<编号>` 实体邮箱；远端通过带 `Internal` 的 `CmdOwner`（0）`Dispatch` 传递 owner JSON 请求，不再依赖 `SessionID` 承载实体键，也没有新增玩法专用 Kitex 方法。发现失败或空列表直接报错，不回退本地。接收端在实体邮箱内重新选主，主人改变返回 `owner.moved`，不会继续转发；这些检查仍不提供发现视图分裂下的分布式锁或双主防护，详见 [owner 文档](owner.md)。
 
 ## 约束与失败边界
 

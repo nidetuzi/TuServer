@@ -28,6 +28,10 @@ func main() {
 		panic(err)
 	}
 	log.BindKitex()
+	if _, err := cfg.ClusterKey(); err != nil {
+		log.Error("cluster secret", "err", err)
+		os.Exit(1)
+	}
 	log.Info("cross start", "addr", cfg.AdvertiseAddr)
 	reg, err := cluster.NewRegistry(cfg.Etcd.Endpoints)
 	if err != nil {
@@ -36,7 +40,7 @@ func main() {
 	}
 	opts, err := cluster.ServerOptions(cfg, reg)
 	if err != nil {
-		log.Error("listen addr", "err", err)
+		log.Error("kitex server", "err", err)
 		os.Exit(1)
 	}
 	svr := crosscli.NewServer(crossAPI{}, opts...)

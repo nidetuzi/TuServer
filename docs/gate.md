@@ -38,8 +38,9 @@
 - 任何 `Dispatch` 错误都会清空当前 `logicAddr`。包括透过 RPC 返回的业务处理错误，并非仅连接错误才触发。
 - **出错的当前帧不重试，也没有错误回包**；只有下一帧才再次 `Pick`。源码注释中“再选一次”不能理解成同一帧内重试。
 - 清空地址时保留 playerId、serverId 和客户端连接；再次选中其他 Logic 不是已有状态的迁移协议。
-- `OnClose` 先删除 Gate 会话。如果之前仍有 logicAddr，则同步发一次 `CmdID: -1` 的 `Dispatch` 通知该 Logic 删除在线记录；错误被忽略。
-- Logic 实际将**任何负 cmdId**当成断开通知并直接删除在线会话，不经过普通 actor。Gate 没有拦截客户端自带的负号或 0；Logic 对 0 在进入会话邮箱前调用 `App.Owners.Handle`，由 owner 解析 JSON 并进入实体邮箱，不更新在线表；未配置 Owners 则报错。该内部入口没有调用来源鉴权，不能把客户端可达的 cmdId 0 当作安全隔离，详见 [owner 文档](owner.md)。
+- `OnPacket` 拒绝 `cmdId <= 0`：打日志、标记会话作废并关闭连接，不转发、不改区服。队列里排在后面的帧也不再转发。
+- `OnClose` 先删除 Gate 会话。如果之前仍有 logicAddr，则同步发一次 `Internal: true`、`CmdDisconnect`（-1）的 `Dispatch`。这个标记不来自客户端帧。错误被忽略。
+- Logic 只在 `Request.Internal` 为真时处理 0 和负数。客户端伪造的主人调用或断线到不了 `Owners.Handle`。详见 [owner 文档](owner.md)。
 - 如果 Dispatch 已清空 logicAddr，后续 OnClose 不会通知原 Logic；异常断开通知、Gate 崩溃也没有其他会话回收协议兜底。
 
 ## 推送与广播
@@ -67,7 +68,7 @@
 ```yaml
 service_name: Gate
 weight: 10
-listen_addr: :9001
+listen_addr: 127.0.0.1:9001
 advertise_addr: 127.0.0.1:9001
 tcp_addr: :8001
 ws_addr: :8002

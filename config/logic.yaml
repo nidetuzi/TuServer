@@ -1,7 +1,9 @@
 service_name: Logic
 weight: 10
-listen_addr: :9101
+listen_addr: 127.0.0.1:9101
 advertise_addr: 127.0.0.1:9101
+# 节点间 Kitex 共享密钥。环境变量 TUSERV_CLUSTER_SECRET 优先；两者都空则拒绝启动。
+cluster_secret: ""
 etcd:
   endpoints:
     - 127.0.0.1:2379

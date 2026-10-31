@@ -6,19 +6,19 @@ TuServer 模块名为 `tuserv`，框架位于 `pkg`，可执行入口位于 `cmd
 
 ### Gate
 
-入口 [`cmd/gate/main.go`](../cmd/gate/main.go)，配置 [`config/gate.yaml`](../config/gate.yaml)。默认客户端 TCP `:8001`、WebSocket `:8002/ws`，Kitex `:9001`，服务名 `Gate`。
+入口 [`cmd/gate/main.go`](../cmd/gate/main.go)，配置 [`config/gate.yaml`](../config/gate.yaml)。默认客户端 TCP `:8001`、WebSocket `:8002/ws`，Kitex `127.0.0.1:9001`，服务名 `Gate`。节点间调用要有共享密钥，见 [配置](config.md)。
 
 装配顺序为配置 → 日志/Kitex 日志适配 → etcd 发现客户端 → Gate 会话管理器 → Kitex 注册与 Push 服务 → 可选 TCP/WS 监听。客户端连接只接入 Gate；玩法不在 Gate 解 protobuf。详情见 [Gate](gate.md) 和 [协议](protocol.md)。
 
 ### Logic
 
-入口 [`cmd/logic/main.go`](../cmd/logic/main.go)，主人适配位于 [`owner.go`](../cmd/logic/owner.go)，配置 [`config/logic.yaml`](../config/logic.yaml)。默认 Kitex `:9101`，服务名 `Logic`。
+入口 [`cmd/logic/main.go`](../cmd/logic/main.go)，主人适配位于 [`owner.go`](../cmd/logic/owner.go)，配置 [`config/logic.yaml`](../config/logic.yaml)。默认 Kitex `127.0.0.1:9101`，服务名 `Logic`。
 
 装配包括 Mongo Store、Cache、Bus、PlayerService、Router、Logic App、Owner Runtime、公会主人操作注册与 Demo 协议注册，之后启动 Kitex 和定时 Flush。Logic 既处理玩家会话，也可承载按键选择的共享实体，不固定属于某个区服。详情见 [Logic](logic.md)、[主人运行时](owner.md)、[Demo](demo.md)。
 
 ### Cross
 
-入口 [`cmd/cross/main.go`](../cmd/cross/main.go)，配置 [`config/cross.yaml`](../config/cross.yaml)。默认 Kitex `:9201`，注册名 `CrossNode`。
+入口 [`cmd/cross/main.go`](../cmd/cross/main.go)，配置 [`config/cross.yaml`](../config/cross.yaml)。默认 Kitex `127.0.0.1:9201`，注册名 `CrossNode`。
 
 当前仅初始化日志、注册 Kitex 服务并应答 `Ping`，没有跨服匹配、战斗、实体缓存、刷盘或玩法路由。不要因为存在进程入口就认为跨服玩法已实现。扩展时应显式装配需要的框架模块，不把客户端游戏协议逐个加成 Kitex 方法。
 

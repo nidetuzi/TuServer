@@ -32,7 +32,8 @@ func TestPinPlayerOnceUntilDisconnect(t *testing.T) {
 	if n.Load() != 1 {
 		t.Fatalf("在线期间应只钉一次, n=%d", n.Load())
 	}
-	req.CmdID = -1
+	req.CmdID = CmdDisconnect
+	req.Internal = true
 	if _, err := app.Handle(ctx, req); err != nil {
 		t.Fatal(err)
 	}

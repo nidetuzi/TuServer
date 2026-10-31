@@ -27,7 +27,7 @@ func newOwners(self string, actors *actor.System, nodes *cluster.Nodes, leases s
 		}
 		return inst.Addr, nil
 	}, func(ctx context.Context, host string, body []byte) ([]byte, error) {
-		resp, err := nodes.Dispatch(ctx, host, logic.Request{CmdID: 0, Body: body})
+		resp, err := nodes.Dispatch(ctx, host, logic.Request{Internal: true, CmdID: logic.CmdOwner, Body: body})
 		return resp.Body, err
 	})
 	rt.Claim = func(ctx context.Context, key owner.EntityKey) (uint64, error) {
@@ -61,7 +61,7 @@ func claimLease(ctx context.Context, leases store.Locker, nodes *cluster.Nodes, 
 		return store.LeaseRec{}, mErr
 	}
 	if _, rerr := nodes.Dispatch(ctx, held.Owner, logic.Request{
-		GateID: logic.InternalCaller, CmdID: logic.CmdRelinquish, ServerID: serverID, Body: body,
+		GateID: logic.InternalCaller, CmdID: logic.CmdRelinquish, Internal: true, ServerID: serverID, Body: body,
 	}); rerr != nil {
 		return store.LeaseRec{}, owner.NewError("owner.lease", held.Error())
 	}

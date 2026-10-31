@@ -23,7 +23,7 @@ func TestInternalOwnerDispatch(t *testing.T) {
 	sourceActors := actor.NewSystem()
 	defer sourceActors.Stop()
 	source := owner.New("source", sourceActors, resolve, func(ctx context.Context, _ string, body []byte) ([]byte, error) {
-		resp, err := app.Handle(ctx, Request{CmdID: 0, Body: body})
+		resp, err := app.Handle(ctx, Request{Internal: true, CmdID: CmdOwner, Body: body})
 		return resp.Body, err
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -40,7 +40,7 @@ func TestInternalOwnerDispatch(t *testing.T) {
 func TestInternalWithoutOwnersFails(t *testing.T) {
 	app := New(router.New[int32](), nil)
 	defer app.Stop()
-	if _, err := app.Handle(context.Background(), Request{CmdID: 0}); err == nil {
+	if _, err := app.Handle(context.Background(), Request{Internal: true, CmdID: CmdOwner}); err == nil {
 		t.Fatal("没有主人调用器时不能把内部消息当作客户端协议")
 	}
 }

@@ -34,8 +34,13 @@ func main() {
 		panic(err)
 	}
 	log.BindKitex()
+	secret, err := cfg.ClusterKey()
+	if err != nil {
+		log.Error("cluster secret", "err", err)
+		os.Exit(1)
+	}
 	log.Info("gate start", "addr", cfg.AdvertiseAddr)
-	nodes, err := cluster.Dial(cfg.Etcd.Endpoints)
+	nodes, err := cluster.Dial(cfg.Etcd.Endpoints, secret)
 	if err != nil {
 		log.Error("etcd dial", "err", err)
 		os.Exit(1)
@@ -48,7 +53,7 @@ func main() {
 	}
 	opts, err := cluster.ServerOptions(cfg, reg)
 	if err != nil {
-		log.Error("listen addr", "err", err)
+		log.Error("kitex server", "err", err)
 		os.Exit(1)
 	}
 	svr := gatecli.NewServer(&pushAPI{gate: g}, opts...)

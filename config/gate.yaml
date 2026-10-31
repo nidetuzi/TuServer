@@ -1,7 +1,9 @@
 service_name: Gate
 weight: 10
-listen_addr: :9001
+listen_addr: 127.0.0.1:9001
 advertise_addr: 127.0.0.1:9001
+# 节点间 Kitex 共享密钥。环境变量 TUSERV_CLUSTER_SECRET 优先；两者都空则拒绝启动。
+cluster_secret: ""
 tcp_addr: :8001
 ws_addr: :8002
 etcd:

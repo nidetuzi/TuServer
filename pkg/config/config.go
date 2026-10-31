@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -17,6 +19,8 @@ type File struct {
 	AdvertiseAddr string `yaml:"advertise_addr"`
 	TCPAddr       string `yaml:"tcp_addr"`
 	WSAddr        string `yaml:"ws_addr"`
+	// ClusterSecret 是节点间 Kitex 的共享密钥。环境变量 TUSERV_CLUSTER_SECRET 优先，避免生产密钥进仓库。
+	ClusterSecret string `yaml:"cluster_secret"`
 	Etcd          struct {
 		Endpoints []string `yaml:"endpoints"`
 	} `yaml:"etcd"`
@@ -42,6 +46,18 @@ type Log struct {
 	MaxSizeMB  int    `yaml:"max_size_mb"`
 	MaxAgeDays int    `yaml:"max_age_days"`
 	AlsoStdout bool   `yaml:"also_stdout"`
+}
+
+// ClusterKey 返回节点间共享密钥。环境变量优先于 yaml。
+// 两者都空时返回错误，调用方应拒绝启动，而不是带着空密钥对外监听。
+func (f File) ClusterKey() (string, error) {
+	if v := strings.TrimSpace(os.Getenv("TUSERV_CLUSTER_SECRET")); v != "" {
+		return v, nil
+	}
+	if v := strings.TrimSpace(f.ClusterSecret); v != "" {
+		return v, nil
+	}
+	return "", errors.New("config: 缺少集群密钥，请设置 TUSERV_CLUSTER_SECRET 或 cluster_secret")
 }
 
 // Load 从路径读取配置。文件不存在时直接失败，避免用空地址启动后才发现连不上。

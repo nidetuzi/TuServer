@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/cloudwego/kitex/client"
@@ -18,6 +19,7 @@ import (
 	gatecli "tuserv/kitex_gen/node/gate"
 	logiccli "tuserv/kitex_gen/node/logic"
 	"tuserv/pkg/config"
+	"tuserv/pkg/log"
 	"tuserv/pkg/logic"
 )
 
@@ -31,17 +33,23 @@ type Nodes struct {
 }
 
 // Dial 连接注册中心并准备 Logic、Gate 两个客户端。
-func Dial(endpoints []string) (*Nodes, error) {
+// secret 为空时直接失败，避免发出没有签名的节点调用。
+func Dial(endpoints []string, secret string) (*Nodes, error) {
+	if strings.TrimSpace(secret) == "" {
+		return nil, ErrMissingSecret
+	}
 	ensureLeaseTTL()
 	resolver, err := etcd.NewEtcdResolver(endpoints)
 	if err != nil {
 		return nil, err
 	}
-	logicClient, err := logiccli.NewClient("Logic", client.WithResolver(resolver))
+	logicOpts := append([]client.Option{client.WithResolver(resolver)}, authClientOpts(secret)...)
+	logicClient, err := logiccli.NewClient("Logic", logicOpts...)
 	if err != nil {
 		return nil, err
 	}
-	gateClient, err := gatecli.NewClient("Gate", client.WithResolver(resolver))
+	gateOpts := append([]client.Option{client.WithResolver(resolver)}, authClientOpts(secret)...)
+	gateClient, err := gatecli.NewClient("Gate", gateOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -59,11 +67,19 @@ func NewRegistry(endpoints []string) (registry.Registry, error) {
 	return etcd.NewEtcdRegistry(endpoints)
 }
 
-// ServerOptions 把监听地址、服务名和权重交给 Kitex。
+// ServerOptions 把监听地址、服务名、权重和节点间验签交给 Kitex。
+// 没有共享密钥时返回错误，调用方不应再监听。
 func ServerOptions(cfg config.File, reg registry.Registry) ([]server.Option, error) {
+	secret, err := cfg.ClusterKey()
+	if err != nil {
+		return nil, err
+	}
 	listen, err := net.ResolveTCPAddr("tcp", cfg.ListenAddr)
 	if err != nil {
 		return nil, err
+	}
+	if listen.IP == nil || listen.IP.IsUnspecified() {
+		log.Warn("kitex listens on all interfaces", "addr", cfg.ListenAddr)
 	}
 	adv := listen
 	if cfg.AdvertiseAddr != "" {
@@ -78,7 +94,7 @@ func ServerOptions(cfg config.File, reg registry.Registry) ([]server.Option, err
 	}
 	name := cfg.ServiceName
 	// 注册对外地址而不是监听通配地址，网关才能按权重选中后连上来。
-	return []server.Option{
+	opts := []server.Option{
 		server.WithServiceAddr(listen),
 		server.WithRegistry(reg),
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: name}),
@@ -88,11 +104,14 @@ func ServerOptions(cfg config.File, reg registry.Registry) ([]server.Option, err
 			Addr:           adv,
 			SkipListenAddr: true,
 		}),
-	}, nil
+	}
+	return append(opts, authServerOpts(secret)...), nil
 }
 
 // Dispatch 把一帧发到指定逻辑节点。地址来自会话绑定，不再做负载均衡。
+// Internal 只影响这一跳的签名，不会把调用方上下文里的旧标记带到别的 RPC。
 func (n *Nodes) Dispatch(ctx context.Context, host string, req logic.Request) (logic.Response, error) {
+	ctx = WithInternalCall(ctx, req.Internal)
 	resp, err := n.logic.Dispatch(ctx, toDispatch(req), callopt.WithHostPort(host))
 	if err != nil {
 		return logic.Response{}, err
@@ -113,6 +132,7 @@ func (n *Nodes) Pick(ctx context.Context) (Instance, error) {
 
 // Push 把包写回持有该会话的网关。
 func (n *Nodes) Push(ctx context.Context, host, sessionID string, cmdID int32, body []byte) error {
+	ctx = WithInternalCall(ctx, false)
 	_, err := n.gate.Push(ctx, nodePush(sessionID, cmdID, body), callopt.WithHostPort(host))
 	return err
 }
@@ -124,6 +144,7 @@ func (n *Nodes) NotifyAll(ctx context.Context, serverID, cmdID int32, body []byt
 		return err
 	}
 	req := toNotify(serverID, cmdID, body)
+	ctx = WithInternalCall(ctx, false)
 	var first error
 	for _, inst := range list {
 		if _, err := n.logic.NotifyServer(ctx, req, callopt.WithHostPort(inst.Addr)); err != nil && first == nil {

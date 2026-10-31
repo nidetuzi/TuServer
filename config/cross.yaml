@@ -1,7 +1,9 @@
 service_name: CrossNode
 weight: 10
-listen_addr: :9201
+listen_addr: 127.0.0.1:9201
 advertise_addr: 127.0.0.1:9201
+# 节点间 Kitex 共享密钥。环境变量 TUSERV_CLUSTER_SECRET 优先；两者都空则拒绝启动。
+cluster_secret: ""
 etcd:
   endpoints:
     - 127.0.0.1:2379

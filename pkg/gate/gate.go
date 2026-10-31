@@ -31,6 +31,9 @@ type session struct {
 	logicAddr string
 	serverID  int32
 	playerID  int64
+	// dead 表示已经拒绝过非法帧。队列里排在后面的包不能再转发。
+	// 会话先留在表里，等连接关闭回调通知逻辑节点，避免人还挂在在线表上。
+	dead bool
 }
 
 // New 创建网关。id 是逻辑节点回推时使用的 Gate 地址。
@@ -49,9 +52,16 @@ func (g *Gate) OnOpen(p protocol.Peer) {
 }
 
 // OnPacket 在会话协程里运行。第一次按权重选节点，失败时清掉地址再选一次。
+// 非正协议号直接丢掉并关掉连接。断线和主人调用不走客户端帧。
 func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 	s := g.session(p.ID())
-	if s == nil {
+	if s == nil || s.dead {
+		return
+	}
+	if pkt.CmdID <= 0 {
+		s.dead = true
+		log.Warn("reject client cmd", "cmd_id", pkt.CmdID, "session_id", p.ID())
+		_ = p.Close()
 		return
 	}
 	s.serverID = pkt.ServerID
@@ -98,7 +108,8 @@ func (g *Gate) OnClose(p protocol.Peer, _ error) {
 		SessionID: p.ID(),
 		ServerID:  s.serverID,
 		PlayerID:  s.playerID,
-		CmdID:     -1,
+		CmdID:     logic.CmdDisconnect,
+		Internal:  true,
 	})
 }
 

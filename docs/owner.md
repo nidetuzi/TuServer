@@ -105,7 +105,7 @@ func example(ctx context.Context) error {
 `newOwners` 注入两部分：
 
 1. Resolver 每次 `nodes.List(ctx, "Logic")`，再调用 `cluster.Owner(list, key.String())`，返回实例地址。发现失败或空列表错误直接返回，不退化为本地写入。
-2. Transport 调用 `nodes.Dispatch(ctx, host, logic.Request{CmdID: 0, Body: body})`，只取响应 Body。不需要把实体键放进 `SessionID`，也没有新增玩法专用 Kitex 方法。
+2. Transport 调用 `nodes.Dispatch(ctx, host, logic.Request{Internal: true, CmdID: CmdOwner, Body: body})`，只取响应 Body。不需要把实体键放进 `SessionID`，也没有新增玩法专用 Kitex 方法。
 
 随后 `service.NewGuildService(c, store, owners)`、`guilds.RegisterOwners()` 注册 `guild.create` 与 `guild.join`，并设置 `app.Owners = owners`。`logic.App.Handle` 对 `CmdID == 0` 在进入会话 actor **之前**调用 `Owners.Handle`；该路径不更新在线会话表。未配置 Owners 时直接返回普通 Go 错误。
 
@@ -175,7 +175,7 @@ func example(ctx context.Context) error {
 - 执行前会向 Mongo 申请租约任期。租约未过期且持有者不同时返回 `owner.lease`，操作不会执行。旧持有者若仍可达，会先被要求刷盘并释放；不可达则要等到租约过期。这不是分布式锁服务，时钟和续约失败仍要靠 `ErrStale` 挡住旧快照。
 - 交接会刷掉旧主人内存中的该实体，但没有通用的脏数据迁移队列。稳定寻址、任期和条件写一起用，仍然不是完整的主从切换协议。
 - 没有 owner 层超时默认值、重试、持久队列、投递确认、恰好一次或跨实体事务。Transport 是普通同步函数，调用者应传合适 deadline。
-- 运行时不鉴权、不验证调用来源，也不校验业务权限。Gate 当前不拦截客户端 cmdId 0，而 Logic 将 0 作为 owner 入口；需要部署隔离和入口权限治理，不能把内部 JSON 协议视为安全边界。
+- 运行时本身不校验业务权限。Logic 只在 `Request.Internal` 为真时把 cmd 0 送进 `Owners.Handle`，Gate 会拒绝客户端 `cmdId <= 0`。节点间还要靠 Kitex 共享密钥。内部 JSON 不是玩家权限系统。
 - Runtime 不拥有 actor 生命周期，没有 Stop；由装配方停止共享的 actor.System。底层邮箱容量为 64，满时 Do 等待或随 context 取消；邮箱按键创建，没有 owner 层空闲回收、限流或全局容量管理。
 - panic 转换针对实体邮箱内执行，不是对 Resolver 首次调用、Transport 等所有外部依赖的全局 panic 保护，也不会撤销 panic 前已完成的修改。
 
@@ -192,6 +192,6 @@ func example(ctx context.Context) error {
 - `TestProtocolAndRegistrationValidation`：重复 / 无效注册、非法 JSON、跳数 0 / 2、参数类型错误、不可编码参数和 nil Runtime。
 - `TestCancellationDoesNotPublishSharedResult`：已开始处理时取消，调用先返回 context.Canceled，释放处理函数后仍可结束。
 
-[Logic 测试](../pkg/logic/owner_test.go) 检查 cmdId 0 经 owner 执行且不创建玩家在线会话，以及未配置 Owners 时拒绝内部请求。[公会测试](../example/demo/service/guild_test.go) 检查本地与模拟远程创建 / 加入、仅主人缓存、快照隔离、重复加入、缓存重新加载、调用失败不修改玩家、错误码、错误 Kind 拒绝、缺少 Runtime 和重复注册失败。
+[Logic 测试](../pkg/logic/owner_test.go) 检查带 Internal 的 cmd 0 经 owner 执行且不创建玩家在线会话，以及未配置 Owners 时拒绝内部请求。[公会测试](../example/demo/service/guild_test.go) 检查本地与模拟远程创建 / 加入、仅主人缓存、快照隔离、重复加入、缓存重新加载、调用失败不修改玩家、错误码、错误 Kind 拒绝、缺少 Runtime 和重复注册失败。
 
 这些远程测试使用进程内 Transport 直接调用 Handle，没有启动真实 Kitex / etcd / Mongo。现有测试不能证明真实网络下的上下文传播、跨节点调用环防护、扩缩容迁移、发现视图分裂时的排他性或持久化可靠性。也未完整覆盖所有配置 / 编解码分支、不同键并行性、队列饱和、Stop 与在途调用并发、取消后的业务补偿或真实 RPC 超时后结果不确定性。上述仅为源码中的断言与覆盖范围说明，不是测试通过报告。

@@ -39,6 +39,11 @@ func main() {
 		panic(err)
 	}
 	log.BindKitex()
+	secret, err := cfg.ClusterKey()
+	if err != nil {
+		log.Error("cluster secret", "err", err)
+		os.Exit(1)
+	}
 	log.Info("logic start", "addr", cfg.AdvertiseAddr)
 	ctx := context.Background()
 	store, err := mongostore.Open(ctx, cfg.Mongo.URI, cfg.Mongo.DBPrefix)
@@ -46,7 +51,7 @@ func main() {
 		log.Error("mongo", "err", err)
 		os.Exit(1)
 	}
-	nodes, err := cluster.Dial(cfg.Etcd.Endpoints)
+	nodes, err := cluster.Dial(cfg.Etcd.Endpoints, secret)
 	if err != nil {
 		log.Error("etcd dial", "err", err)
 		os.Exit(1)
@@ -70,7 +75,7 @@ func main() {
 		Self:   self,
 		Leases: store,
 		AskRelease: func(ctx context.Context, host string, body []byte) error {
-			_, err := nodes.Dispatch(ctx, host, logic.Request{GateID: logic.InternalCaller, CmdID: logic.CmdRelinquish, Body: body})
+			_, err := nodes.Dispatch(ctx, host, logic.Request{GateID: logic.InternalCaller, CmdID: logic.CmdRelinquish, Internal: true, Body: body})
 			return err
 		},
 		Touch: func(ctx context.Context, serverID int32, playerID int64, term uint64) {
@@ -113,7 +118,7 @@ func main() {
 	}
 	opts, err := cluster.ServerOptions(cfg, reg)
 	if err != nil {
-		log.Error("listen addr", "err", err)
+		log.Error("kitex server", "err", err)
 		os.Exit(1)
 	}
 	svr := logiccli.NewServer(&logicAPI{app: app, nodes: nodes}, opts...)
@@ -207,6 +212,7 @@ func (s *logicAPI) Dispatch(ctx context.Context, req *node.DispatchReq) (*node.D
 		PlayerID:  req.GetPlayerId(),
 		CmdID:     req.GetCmdId(),
 		Body:      req.GetBody(),
+		Internal:  cluster.IsInternalCall(ctx),
 	})
 	if err != nil {
 		return nil, err

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"tuserv/pkg/actor"
+	"tuserv/pkg/errcode"
 	"tuserv/pkg/handler"
 	"tuserv/pkg/lease"
 	"tuserv/pkg/log"
@@ -24,7 +25,17 @@ type Request struct {
 	PlayerID  int64
 	CmdID     int32
 	Body      []byte
+	// Internal 为真时才允许 0 和负数协议号。
+	// 客户端帧里没有这一位，网关转发时也不会从帧里抄出来。
+	Internal bool
 }
+
+// ErrClientCmd 表示客户端请求使用了非正协议号。
+// 它走统一错误帧而不是 RPC 错误，网关才不会把还活着的 Logic 拆掉。0 和负数只留给带 Internal 的内部调用。
+var ErrClientCmd = errcode.New(errcode.BadArg, "logic.client_cmd")
+
+// ErrInternalCmd 表示内部调用带了未知协议号。
+var ErrInternalCmd = errors.New("logic: unknown internal cmd")
 
 // Response 带回角色编号，网关才能在登录后把 playerId 记到会话上。
 type Response struct {
@@ -97,25 +108,14 @@ func New(r *router.Router[int32], load handler.Loader) *App {
 }
 
 // Handle 在该角色的 actor 里执行协议。已登录的请求按角色编号串行，而不是按连接。
-// cmdId 小于 0 且不是内部交接时，表示网关通知连接已断开。
-// 玩法失败会编成统一错误包，并返回 nil error。非 nil 只表示这次请求没有在本节点正常结束，网关应重选。
+// 客户端只能走正数协议号。断线、主人调用和租约交接必须带 Internal，避免把协议号本身当成凭证。
+// 玩法失败和非法协议号都会编成统一错误包，并返回 nil error。非 nil 只表示这次请求没有在本节点正常结束，网关应重选。
 func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
-	if req.CmdID == CmdRelinquish {
-		if req.GateID != InternalCaller {
-			a.dropSession(req.SessionID)
-			return Response{}, nil
-		}
-		return Response{}, a.relinquish(ctx, req.Body)
+	if req.Internal {
+		return a.handleInternal(ctx, req)
 	}
-	if req.CmdID < 0 {
-		return Response{}, a.onDisconnect(ctx, req)
-	}
-	if req.CmdID == 0 {
-		if a.Owners == nil {
-			return Response{}, errors.New("logic: owner runtime unavailable")
-		}
-		body, err := a.Owners.Handle(ctx, req.Body)
-		return Response{Body: body}, err
+	if req.CmdID <= 0 {
+		return clientError(req, ErrClientCmd), nil
 	}
 	var (
 		resp  Response
@@ -203,6 +203,24 @@ func (a *App) withGuard(fn func()) {
 	release := a.Hooks.Guard()
 	defer release()
 	fn()
+}
+
+// handleInternal 只接受节点自己发出的命令。协议号对不上就拒绝，不能落进客户端路由。
+func (a *App) handleInternal(ctx context.Context, req Request) (Response, error) {
+	switch req.CmdID {
+	case CmdOwner:
+		if a.Owners == nil {
+			return Response{}, errors.New("logic: owner runtime unavailable")
+		}
+		body, err := a.Owners.Handle(ctx, req.Body)
+		return Response{Body: body}, err
+	case CmdDisconnect:
+		return Response{}, a.onDisconnect(ctx, req)
+	case CmdRelinquish:
+		return Response{}, a.relinquish(ctx, req.Body)
+	default:
+		return Response{}, ErrInternalCmd
+	}
 }
 
 // RenewLeases 给仍在线的角色续约。空闲连接不再发协议时，也不能让租约自己过期后被另一台节点接走。

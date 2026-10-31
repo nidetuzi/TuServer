@@ -8,8 +8,8 @@ Go 版本是 `go 1.27`，工具链 `go1.27.3`。
 
 | 进程 | 配置 | 作用 |
 | --- | --- | --- |
-| `cmd/gate` | `config/gate.yaml` | 客户端 TCP `:8001`、WebSocket `:8002/ws`，Kitex `:9001` |
-| `cmd/logic` | `config/logic.yaml` | 玩家 actor、缓存刷盘，Kitex `:9101` |
+| `cmd/gate` | `config/gate.yaml` | 客户端 TCP `:8001`、WebSocket `:8002/ws`，Kitex `127.0.0.1:9001` |
+| `cmd/logic` | `config/logic.yaml` | 玩家 actor、缓存刷盘，Kitex `127.0.0.1:9101` |
 | `cmd/cross` | `config/cross.yaml` | 只向 etcd 注册 `CrossNode` 并应答 `Ping`，没有跨服玩法 |
 
 区服不固定在某一台 LogicNode 上。新会话按 etcd 里的权重选一次逻辑节点，地址记在会话上，之后的包都发到这个地址。同一区服的其他玩家可以在别的节点。节点租约到期后清掉绑定，下次再选，角色从 Mongo 重新加载。租约默认 5 秒（`KITEX_ETCD_REGISTRY_LEASE_TTL`）。
@@ -27,7 +27,7 @@ Go 版本是 `go 1.27`，工具链 `go1.27.3`。
 
 ## 启动
 
-在仓库根目录执行。配置路径是第一个参数，省略时用上表里的默认文件。多开 LogicNode 时复制 `config/logic.yaml`，改 `listen_addr`、`advertise_addr` 和 `weight`。对外地址必须能被其他节点连上，并和配置里的 `advertise_addr` 一致。
+在仓库根目录执行。配置路径是第一个参数，省略时用上表里的默认文件。多开 LogicNode 时复制 `config/logic.yaml`，改 `listen_addr`、`advertise_addr` 和 `weight`。对外地址必须能被其他节点连上，并和配置里的 `advertise_addr` 一致。节点间 Kitex 需要共享密钥：设置 `TUSERV_CLUSTER_SECRET`，或在 yaml 写 `cluster_secret`。两者都空时进程拒绝启动。示例里的 Kitex 只监听 `127.0.0.1`。
 
 ```text
 go run ./cmd/logic config/logic.yaml

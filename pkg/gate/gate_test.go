@@ -10,6 +10,19 @@ import (
 	"tuserv/pkg/protocol"
 )
 
+type fakeFwd struct {
+	reqs []logic.Request
+}
+
+func (f *fakeFwd) Dispatch(_ context.Context, _ string, req logic.Request) (logic.Response, error) {
+	f.reqs = append(f.reqs, req)
+	return logic.Response{CmdID: req.CmdID, Body: []byte("ok")}, nil
+}
+
+func (f *fakeFwd) Pick(context.Context) (cluster.Instance, error) {
+	return cluster.Instance{Addr: "127.0.0.1:9101", Weight: 1}, nil
+}
+
 type fakePeer struct {
 	id     string
 	closed bool
@@ -94,5 +107,45 @@ func TestBusinessErrorKeepsLogicBinding(t *testing.T) {
 	g.OnPacket(p, protocol.Packet{CmdID: 1003, ServerID: 3})
 	if fwd.picks != 2 || s.logicAddr != "10.0.0.8:1" || p.wrote != 3 {
 		t.Fatalf("解绑后下一帧应重选节点: picks=%d addr=%s wrote=%d", fwd.picks, s.logicAddr, p.wrote)
+	}
+}
+
+func TestOnPacketRejectsNonPositiveCmd(t *testing.T) {
+	fwd := &fakeFwd{}
+	g := New("127.0.0.1:9001", fwd, nil)
+	p := &fakePeer{id: "1"}
+	g.OnOpen(p)
+	for _, cmd := range []int32{0, -1, logic.CmdRelinquish} {
+		g.OnPacket(p, protocol.Packet{CmdID: cmd, ServerID: 9, Body: []byte("x")})
+	}
+	if len(fwd.reqs) != 0 {
+		t.Fatalf("非正协议号不应转发: %+v", fwd.reqs)
+	}
+	if !p.closed {
+		t.Fatal("非法帧应关掉连接")
+	}
+}
+
+func TestOnPacketForwardsPositiveAndCloseIsInternal(t *testing.T) {
+	fwd := &fakeFwd{}
+	g := New("127.0.0.1:9001", fwd, nil)
+	p := &fakePeer{id: "1"}
+	g.OnOpen(p)
+	g.OnPacket(p, protocol.Packet{CmdID: 1001, ServerID: 3, Body: []byte("a")})
+	g.OnPacket(p, protocol.Packet{CmdID: 0, ServerID: 9, Body: []byte("bad")})
+	g.OnPacket(p, protocol.Packet{CmdID: 1002, ServerID: 3, Body: []byte("b")})
+	g.OnClose(p, nil)
+	if len(fwd.reqs) != 2 {
+		t.Fatalf("应只转发正数帧和断线通知: %+v", fwd.reqs)
+	}
+	if fwd.reqs[0].CmdID != 1001 || fwd.reqs[0].Internal || fwd.reqs[0].ServerID != 3 {
+		t.Fatalf("客户端帧不应带内部标记: %+v", fwd.reqs[0])
+	}
+	got := fwd.reqs[1]
+	if got.CmdID != logic.CmdDisconnect || !got.Internal || got.ServerID != 3 {
+		t.Fatalf("断线通知应是内部调用且沿用原区服: %+v", got)
+	}
+	if p.wrote != 1 {
+		t.Fatalf("非法帧之后不应再回包: wrote=%d", p.wrote)
 	}
 }

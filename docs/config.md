@@ -14,8 +14,9 @@
 
 - `service_name`：Kitex 服务名。仓库示例分别为 `Gate`、`Logic`、`CrossNode`，发现和注册必须使用匹配的名字。
 - `weight`：节点注册权重；Logic 新会话选址使用它，不代表区服归属，也不参与共享实体主人的哈希选择。
-- `listen_addr`：本机 Kitex 监听地址，例如 `:9101`。
+- `listen_addr`：本机 Kitex 监听地址。示例配置是 `127.0.0.1:9101`。写成 `:9101` 或 `0.0.0.0` 会监听所有网卡，仅在明确需要时使用。
 - `advertise_addr`：其他节点实际可访问的 Kitex 地址，例如 `127.0.0.1:9101`；跨机器部署不能使用回环地址。
+- `cluster_secret`：节点间 Kitex HMAC 共享密钥。环境变量 `TUSERV_CLUSTER_SECRET` 优先。两者都空时进程拒绝启动。
 - `tcp_addr`、`ws_addr`：仅 Gate 读取，留空禁用对应入口。WS 路径固定 `/ws`，不是配置字段。
 - `etcd.endpoints`：etcd 地址列表，用于节点发现和注册。
 
@@ -60,12 +61,12 @@ _ = interval
 
 - 当前使用 `yaml.Unmarshal`，未启用严格未知字段校验；拼错字段可能被忽略。
 - `Load` 不验证必填项、服务名、地址可达性、Mongo 可用性或权重合理性。解析成功不代表能启动或完成请求。
-- 没有环境变量插值、配置合并、命令行字段覆盖和动态重载。修改 YAML 后需重启进程。
+- 除 `TUSERV_CLUSTER_SECRET` 覆盖 `cluster_secret` 外，没有环境变量插值、配置合并、命令行字段覆盖和动态重载。修改 YAML 后需重启进程。
 - 错误的 `flush_interval` 静默退回 1 秒，不会导致启动失败，也不会禁用刷盘。
 - 库名和刷盘属于 Logic，客户端监听属于 Gate；共享配置结构不意味着所有进程使用所有字段。
 
 ## 测试与关联文档
 
-当前 `pkg/config` 没有独立测试文件。建议扩展时覆盖非法 YAML、未知字段策略、duration 回退和工作目录行为。本文仅说明现有实现，不表示这些检查已自动完成。
+`pkg/config/config_test.go` 覆盖集群密钥的环境变量优先、文件回退和缺省失败。非法 YAML、未知字段和 duration 回退仍没有单独用例。
 
 相关：[进程启动](processes.md)、[集群](cluster.md)、[缓存](cache.md)、[日志](log.md)。

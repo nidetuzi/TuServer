@@ -35,10 +35,10 @@
 ## 3. 命令分支与主要 API
 
 - `logic.New(r, load)`：创建运行时与独立 actor 系统。`r` 应预先注册完毕；`load` 签名是 `func(context.Context, int32, int64) (any, error)`，Demo 使用 `players.GetByID`，最终走缓存 `Get`。
-- `App.Handle(ctx, Request)`：同步等待请求处理，返回响应或 Go 错误。没有内建业务错误包格式。
-- `CmdID < 0`：立即删除会话表项并返回空响应；不经过 actor，不分发路由，不刷盘，不移除 actor 或缓存。
-- `CmdID == 0`：直接在会话 actor 外调用 `App.Owners.Handle(ctx, req.Body)`，由主人运行时根据 Body 中的实体键进入实体邮箱。不创建 `handler.Context`、不走 Router、不登记在线会话；`SessionID` 不决定实体邮箱。
-- `CmdID == 0 && App.Owners == nil`：返回 `logic: owner runtime unavailable`，不会回落到普通路由。0 保留给节点内部操作，客户端玩法使用正数。
+- `App.Handle(ctx, Request)`：同步等待请求处理。玩法失败编成 `protocol.CmdError`，Go error 为 nil；非 nil 只表示节点没有正常结束。
+- `Request.Internal == false` 且 `CmdID <= 0`：回 `BadArg` / `logic.client_cmd` 错误帧，error 为 nil。不进主人运行时，不当断线，不刷盘，不删会话。Gate 入口仍会直接断开，正常客户端到不了这里。
+- `Request.Internal == true` 才处理内部命令：`CmdOwner`（0）在会话 actor 外调用 `Owners.Handle`；`CmdDisconnect`（-1）走断线；`CmdRelinquish`（-3）交出租约。其他协议号返回 `ErrInternalCmd`，不会掉进客户端路由。
+- 未配置 `Owners` 时，内部的 cmd 0 返回 `logic: owner runtime unavailable`，不会回落到普通路由。
 - `Sessions(serverID)`：返回本节点对应区服的会话值切片；遍历顺序不保证，只代表最近一次成功普通请求记录的状态。
 - `App.Stop()`：关闭 actor 邮箱，不等同于停止 Kitex、刷盘或等待所有 actor 退出。
 
@@ -115,7 +115,7 @@ func main() {
 - `owner.New(self, actors, resolver, transport)` 注入地址解析和传输。`Resolver` 返回当前主人地址，`Transport` 传递编码后的请求与响应；缺失配置返回错误，发现失败不自动降级本地。
 - `owner.Register(runtime, name, fn)` 注册 `func(context.Context, owner.EntityKey, Req) (Resp, error)`。操作名重复返回 `owner.duplicate`，与 Router 覆盖同键的语义不同。
 - `owner.Call[Resp](ctx, runtime, key, operation, args)` 对参数和响应执行 JSON 编解码，本地与远端都复制 DTO，调用者不会取得主人实体指针。
-- `Runtime.Handle(ctx, body)` 是内部接收入口，必须在实体 actor 外调用；App 的 cmd 0 分支直接交给它，避免先占据邮箱再同步等待自己。
+- `Runtime.Handle(ctx, body)` 是内部接收入口，必须在实体 actor 外调用；App 仅在 `Internal` 且 cmd 0 时交给它，避免先占据邮箱再同步等待自己。
 
 ### 从玩家到主人再返回
 
