@@ -6,6 +6,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	drv "go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"tuserv/pkg/store"
 )
@@ -59,6 +60,130 @@ func (s *Store) MutateLease(ctx context.Context, serverID int32, key string, fn 
 		last = errors.New("lease: conflict")
 	}
 	return store.LeaseRec{}, last
+}
+
+// RenewMany 按区服各做一次 BulkWrite。每条更新都带 owner 和 term，对不上的不写。
+// 一条 UpdateMany 无法为不同任期分别设条件，所以用无序 BulkWrite 把多次条件更新合成一次往返。
+// 只改 until。改持有者或任期会把刚刚被别的节点接走的租约覆盖回去。
+func (s *Store) RenewMany(ctx context.Context, items []store.LeaseTouch) ([]store.LeaseMiss, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	groups := make(map[int32][]store.LeaseTouch)
+	for _, it := range items {
+		groups[it.ServerID] = append(groups[it.ServerID], it)
+	}
+	var misses []store.LeaseMiss
+	for serverID, batch := range groups {
+		part, err := s.renewServer(ctx, serverID, batch)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			for _, it := range batch {
+				misses = append(misses, store.LeaseMiss{ServerID: it.ServerID, Key: it.Key, Err: err})
+			}
+			continue
+		}
+		misses = append(misses, part...)
+	}
+	if len(misses) == 0 {
+		return nil, nil
+	}
+	return misses, nil
+}
+
+func (s *Store) renewServer(ctx context.Context, serverID int32, batch []store.LeaseTouch) ([]store.LeaseMiss, error) {
+	var misses []store.LeaseMiss
+	send := make([]store.LeaseTouch, 0, len(batch))
+	for _, it := range batch {
+		if it.Key == "" {
+			misses = append(misses, store.LeaseMiss{ServerID: it.ServerID, Key: it.Key, Err: store.ErrLeaseHeld})
+			continue
+		}
+		send = append(send, it)
+	}
+	if len(send) == 0 {
+		return misses, nil
+	}
+	models := make([]drv.WriteModel, len(send))
+	ids := make([]string, len(send))
+	for i, it := range send {
+		filter, update := leaseRenewSpec(it)
+		models[i] = drv.NewUpdateOneModel().SetFilter(filter).SetUpdate(update)
+		ids[i] = it.Key
+	}
+	coll := s.coll(serverID, "lease")
+	res, err := coll.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
+	if err != nil {
+		return nil, err
+	}
+	if res != nil && res.MatchedCount == int64(len(send)) {
+		return misses, nil
+	}
+	// BulkWrite 只给出匹配条数。部分没对上时再读一次，才能指出是哪几条没有续上。
+	got, err := loadRenewed(ctx, coll, ids)
+	if err != nil {
+		return nil, err
+	}
+	misses = append(misses, renewMisses(send, got)...)
+	return misses, nil
+}
+
+// leaseRenewSpec 是单条续期的过滤和更新。过滤必须带上持有者和任期，更新不能改这两项。
+func leaseRenewSpec(it store.LeaseTouch) (filter, update bson.D) {
+	filter = bson.D{
+		{Key: "_id", Value: it.Key},
+		{Key: "owner", Value: it.Owner},
+		{Key: "term", Value: it.Term},
+	}
+	update = bson.D{{Key: "$set", Value: bson.D{{Key: "until", Value: it.Until}}}}
+	return filter, update
+}
+
+func renewMisses(items []store.LeaseTouch, got map[string]leaseDoc) []store.LeaseMiss {
+	var misses []store.LeaseMiss
+	for _, it := range items {
+		doc, ok := got[it.Key]
+		if !ok || doc.Owner != it.Owner {
+			owner := ""
+			if ok {
+				owner = doc.Owner
+			}
+			misses = append(misses, store.LeaseMiss{ServerID: it.ServerID, Key: it.Key, Owner: owner, Err: store.ErrLeaseHeld})
+			continue
+		}
+		// 持有者还是自己但任期不同：不能写成被别人持有，上层会据此踢掉仍在线的会话。
+		if it.Term == 0 || doc.Term != it.Term {
+			misses = append(misses, store.LeaseMiss{ServerID: it.ServerID, Key: it.Key, Owner: doc.Owner, Err: store.ErrLeaseTerm})
+		}
+	}
+	return misses
+}
+
+func loadRenewed(ctx context.Context, coll *drv.Collection, ids []string) (map[string]leaseDoc, error) {
+	cur, err := coll.Find(ctx, bson.M{"_id": bson.M{"$in": ids}}, options.Find().SetProjection(bson.M{
+		"owner": 1, "term": 1, "until": 1,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	got := make(map[string]leaseDoc, len(ids))
+	for cur.Next(ctx) {
+		var doc leaseDoc
+		if err := cur.Decode(&doc); err != nil {
+			return nil, err
+		}
+		got[doc.ID] = doc
+	}
+	if err := cur.Err(); err != nil {
+		return nil, err
+	}
+	return got, nil
 }
 
 func loadLease(ctx context.Context, coll *drv.Collection, key string) (store.LeaseRec, bool, error) {

@@ -153,6 +153,45 @@ func id(serverID int32, collection, key string) string {
 	return collection + "|" + itoa(serverID) + "|" + key
 }
 
+// RenewMany 在同一把锁里续上仍然匹配的租约。
+// 不插入新记录，也不修改持有者和任期，避免批量续期把别人刚接走的租约覆盖掉。
+func (s *Store) RenewMany(_ context.Context, items []store.LeaseTouch) ([]store.LeaseMiss, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.leases == nil {
+		s.leases = make(map[string]store.LeaseRec)
+	}
+	var misses []store.LeaseMiss
+	for _, it := range items {
+		k := itoa(it.ServerID) + "|" + it.Key
+		cur, ok := s.leases[k]
+		// 不存在、已释放或持有者不同，都还不是自己的租约。零值 Found 为 false，和库里没有是同一条路。
+		if !ok || !cur.Found || cur.Owner != it.Owner {
+			owner := ""
+			if ok && cur.Found {
+				owner = cur.Owner
+			}
+			misses = append(misses, store.LeaseMiss{ServerID: it.ServerID, Key: it.Key, Owner: owner, Err: store.ErrLeaseHeld})
+			continue
+		}
+		// 旧任期不能把本节点后来拿到的新任期续长，否则断线时按旧任期释放会放空。
+		if it.Term == 0 || cur.Term != it.Term {
+			misses = append(misses, store.LeaseMiss{ServerID: it.ServerID, Key: it.Key, Owner: cur.Owner, Err: store.ErrLeaseTerm})
+			continue
+		}
+		cur.Until = it.Until
+		cur.Found = true
+		s.leases[k] = cur
+	}
+	if len(misses) == 0 {
+		return nil, nil
+	}
+	return misses, nil
+}
+
 // MutateLease 在锁内完成租约的读改写，fn 返回错误时保持原值。
 func (s *Store) MutateLease(_ context.Context, serverID int32, key string, fn func(store.LeaseRec) (store.LeaseRec, error)) (store.LeaseRec, error) {
 	s.mu.Lock()

@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"tuserv/pkg/lease"
 	"tuserv/pkg/log"
 )
 
@@ -28,10 +29,15 @@ type File struct {
 		URI      string `yaml:"uri"`
 		DBPrefix string `yaml:"db_prefix"`
 	} `yaml:"mongo"`
-	FlushInterval     string `yaml:"flush_interval"`
-	IdleTimeout       string `yaml:"idle_timeout"`
+	FlushInterval string `yaml:"flush_interval"`
+	// RenewInterval 是在线角色续租间隔，应小于租约 TTL，并且不跟刷盘共用一个循环。
+	RenewInterval string `yaml:"renew_interval"`
+	IdleTimeout   string `yaml:"idle_timeout"`
+	// GateProbeInterval 是对照注册中心网关列表的间隔。
 	GateProbeInterval string `yaml:"gate_probe_interval"`
 	GateMisses        int    `yaml:"gate_misses"`
+	// GateReapParallel 是一台失联网关同时清理的会话数。
+	GateReapParallel int `yaml:"gate_reap_parallel"`
 	// Cache 控制逻辑节点内存里的实体数量。两项都留空或为 0 时不淘汰。
 	Cache struct {
 		MaxItems int    `yaml:"max_items"`
@@ -109,6 +115,19 @@ func (f File) CacheIdle() time.Duration {
 	return d
 }
 
+// RenewEvery 解析续租间隔。空字符串、非法值、非正数或不小于租约 TTL 时约为 TTL 的三分之一。
+// 间隔一旦不小于 TTL，别的节点就能在下一次续租前合法接手。
+func (f File) RenewEvery() time.Duration {
+	if f.RenewInterval == "" {
+		return lease.TTL / 3
+	}
+	d, err := time.ParseDuration(f.RenewInterval)
+	if err != nil || d <= 0 || d >= lease.TTL {
+		return lease.TTL / 3
+	}
+	return d
+}
+
 // FlushEvery 解析刷盘间隔。空字符串按 1 秒，避免逻辑节点从不落库。
 func (f File) FlushEvery() time.Duration {
 	if f.FlushInterval == "" {
@@ -157,4 +176,13 @@ func (f File) GateMissLimit() int {
 		return 2
 	}
 	return f.GateMisses
+}
+
+// ReapParallel 是清理同一台失联网关时同时处理的会话数。
+// 小于等于 0 按 8。串行刷几千个会话会把探测循环占住，续租已经拆走，这里只是把清理本身缩短。
+func (f File) ReapParallel() int {
+	if f.GateReapParallel <= 0 {
+		return 8
+	}
+	return f.GateReapParallel
 }

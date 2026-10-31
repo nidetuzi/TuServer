@@ -195,6 +195,10 @@ func (failLock) MutateLease(context.Context, int32, string, func(store.LeaseRec)
 	return store.LeaseRec{}, errors.New("lease down")
 }
 
+func (failLock) RenewMany(context.Context, []store.LeaseTouch) ([]store.LeaseMiss, error) {
+	return nil, errors.New("lease down")
+}
+
 func mustFault(t *testing.T, resp Response) protocol.ErrorBody {
 	t.Helper()
 	if resp.CmdID != protocol.CmdError {

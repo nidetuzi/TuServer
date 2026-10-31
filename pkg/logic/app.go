@@ -87,12 +87,18 @@ type Hooks struct {
 	PinPlayer func(serverID int32, playerID int64) (release func())
 }
 
+// DefaultReapParallel 是一台失联网关同时清理的会话数。
+// 每个会话都要刷盘再放租约，串行清几千个会把探测循环占住；角色邮箱本身仍是串行的。
+const DefaultReapParallel = 8
+
 // App 把协议送进 actor 并维护本节点会话表。
 type App struct {
 	Router *router.Router[int32]
 	Actors *actor.System
 	Load   handler.Loader
 	Hooks  Hooks
+	// ReapParallel 限制一台失联网关同时清理多少条会话。小于 1 时用 DefaultReapParallel。
+	ReapParallel int
 
 	mu       sync.Mutex
 	sessions map[string]Session
@@ -238,7 +244,7 @@ func (a *App) handleInternal(ctx context.Context, req Request) (Response, error)
 
 // RenewLeases 只延长本节点仍持有的租约。
 // 空闲连接不再发协议时也要续约，否则过期后别的节点会接走还没刷盘的修改。
-// 不能走 enter：Claim 失败时它会 AskRelease。锁外拿着旧快照去 enter，会让新持有者刷盘交出租约并踢掉新会话，旧节点再 Claim 成功，接着发现绑定已经没了又把租约 Release 掉，角色两边都不在线。
+// 一次批量写代替逐条 MutateLease，并且不能走 enter：Claim 失败会 AskRelease，锁外的旧快照可能把新会话踢掉。
 func (a *App) RenewLeases(ctx context.Context) {
 	if a.Hooks.Leases == nil {
 		return
@@ -253,30 +259,57 @@ func (a *App) RenewLeases(ctx context.Context) {
 	if a.Hooks.Now != nil {
 		now = a.Hooks.Now()
 	}
+	until := now.Add(lease.TTL).UnixMilli()
+	items := make([]store.LeaseTouch, 0, len(list))
+	snaps := make([]binding, 0, len(list))
 	for _, b := range list {
-		a.renewBound(ctx, b, now)
+		// 快照是锁外拷的。写之前再对一下，避免给已经换掉的会话或任期去延长租约。
+		if !a.bindingUnchanged(b) {
+			continue
+		}
+		snaps = append(snaps, b)
+		items = append(items, store.LeaseTouch{
+			ServerID: b.ServerID,
+			Key:      playerLeaseKey(b.ServerID, b.PlayerID),
+			Owner:    a.Hooks.Self,
+			Term:     b.Term,
+			Until:    until,
+		})
+	}
+	if len(items) == 0 {
+		return
+	}
+	misses, err := lease.RenewOwn(ctx, a.Hooks.Leases, items)
+	if err != nil {
+		log.Error("renew leases", "err", err, "n", len(items))
+		return
+	}
+	missed := make(map[string]store.LeaseMiss, len(misses))
+	for _, m := range misses {
+		missed[m.Key] = m
+	}
+	for _, b := range snaps {
+		key := playerLeaseKey(b.ServerID, b.PlayerID)
+		if m, ok := missed[key]; ok {
+			if errors.Is(m.Err, lease.ErrHeld) {
+				// 已经被别人持有、已经释放，或库里没有。放弃本地会话，不要再 Claim，更不能 AskRelease。
+				a.abandonLost(ctx, b, m.Err)
+			}
+			// 任期仍属于本节点但已经对不上时什么都不做，避免把还在线的会话踢掉。
+			continue
+		}
+		a.releaseIfUnbound(ctx, b)
 	}
 }
 
-// renewBound 续一条快照。先在锁内确认绑定还在且没被换掉，再按持有者和任期续期。
-func (a *App) renewBound(ctx context.Context, b binding, now time.Time) {
-	if !a.bindingUnchanged(b) {
-		return
-	}
+// releaseIfUnbound 在批量续期已经写上之后复核绑定。
+// 绑定还在就留着；会话或任期换过则不动；绑定没了说明断线先删了表，按原任期把刚续上的租约还回去。
+func (a *App) releaseIfUnbound(ctx context.Context, b binding) {
 	key := playerActorKey(b.ServerID, b.PlayerID)
-	rec, err := lease.Renew(ctx, a.Hooks.Leases, b.ServerID, playerLeaseKey(b.ServerID, b.PlayerID), a.Hooks.Self, b.Term, now, lease.TTL)
-	if errors.Is(err, lease.ErrHeld) {
-		// 已经被别人持有或已经释放。放弃本地会话，不要再 Claim，更不能 AskRelease。
-		a.abandonLost(ctx, b, err)
-		return
-	}
-	if err != nil {
-		return
-	}
 	a.mu.Lock()
 	cur, ok := a.bound[key]
 	if ok && cur.ID == b.ID && cur.Term == b.Term && cur.GateAddr == b.GateAddr {
-		cur.Term = rec.Term
+		cur.Term = b.Term
 		a.bound[key] = cur
 		a.mu.Unlock()
 		return
@@ -285,7 +318,6 @@ func (a *App) renewBound(ctx context.Context, b binding, now time.Time) {
 	if ok {
 		return
 	}
-	// 续约时绑定还在，写完发现断线或死网关已经把它删了。这次只延长了自己的任期，按同一任期还回去，避免没有会话的角色占着租约。
 	_ = lease.Release(ctx, a.Hooks.Leases, b.ServerID, playerLeaseKey(b.ServerID, b.PlayerID), a.Hooks.Self, b.Term)
 }
 
@@ -544,17 +576,52 @@ func (a *App) dropGate(ctx context.Context, gateAddr string) {
 		return
 	}
 	log.Info("gate offline", "gate", gateAddr, "sessions", len(list))
-	for _, s := range list {
-		// 必须走内部断线。不带 Internal 时负数协议号会被当成客户端非法帧，会话和缓存钉住都留着。
-		_, _ = a.Handle(ctx, Request{
-			GateID:    gateAddr,
-			SessionID: s.ID,
-			ServerID:  s.ServerID,
-			PlayerID:  s.PlayerID,
-			CmdID:     CmdDisconnect,
-			Internal:  true,
-		})
+	n := a.reapParallel()
+	if n > len(list) {
+		n = len(list)
 	}
+	if n < 1 {
+		n = 1
+	}
+	// 缓冲住这一轮快照，发送方不会和 worker 互相卡住。ctx 取消后不再开新的断线，已经在跑的会话仍走完。
+	jobs := make(chan Session, len(list))
+	for _, s := range list {
+		jobs <- s
+	}
+	close(jobs)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for s := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				a.disconnectSession(ctx, gateAddr, s)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func (a *App) reapParallel() int {
+	if a.ReapParallel < 1 {
+		return DefaultReapParallel
+	}
+	return a.ReapParallel
+}
+
+func (a *App) disconnectSession(ctx context.Context, gateAddr string, s Session) {
+	// 必须走内部断线。不带 Internal 时负数协议号会被当成客户端非法帧，会话和缓存钉住都留着。
+	_, _ = a.Handle(ctx, Request{
+		GateID:    gateAddr,
+		SessionID: s.ID,
+		ServerID:  s.ServerID,
+		PlayerID:  s.PlayerID,
+		CmdID:     CmdDisconnect,
+		Internal:  true,
+	})
 }
 
 // boundPlayer 按连接编号反查已经登录的角色。会话表和绑定是一起写上的，对不上就当没有。

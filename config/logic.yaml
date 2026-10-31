@@ -11,12 +11,17 @@ mongo:
   uri: mongodb://127.0.0.1:27017
   db_prefix: game_
 flush_interval: 1s
+# 在线角色续租间隔，必须小于租约 TTL（15s）。留空、非法、非正数或不小于 TTL 时约为 TTL 的三分之一。
+# 这条循环和刷盘、网关清理分开，避免 Mongo 变慢时租约过期被别的节点接走。
+renew_interval: 5s
 cache:
   max_items: 20000
   idle: 10m
 # 对照 etcd 里的 Gate。连续缺席 gate_misses 次后，按断线流程清掉挂在该网关上的会话。
 gate_probe_interval: 5s
 gate_misses: 2
+# 一台失联网关同时清理的会话数。留空或非正数时为 8，避免几千个会话串行刷盘把探测拖住。
+gate_reap_parallel: 8
 log:
   level: info
   format: text

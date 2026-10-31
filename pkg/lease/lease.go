@@ -67,6 +67,39 @@ func Claim(ctx context.Context, backend store.Locker, serverID int32, key, self,
 	})
 }
 
+// RenewOwn 批量延长仍然属于这些 owner 和 term 的租约。
+// 和 Claim 不同，这里不会在空闲或过期时接手。miss 里 ErrHeld 表示不存在或已被别人持有，其他错误表示任期变了或这次存储没写上。
+// 两种失败都不该据此去要求别的节点交出。整批结果无法判断时才返回 error，此时不要把 misses 当成已经逐条核对过。
+func RenewOwn(ctx context.Context, backend store.Locker, items []store.LeaseTouch) ([]store.LeaseMiss, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if backend == nil {
+		return nil, errors.New("lease: backend is required")
+	}
+	misses, err := backend.RenewMany(ctx, items)
+	if err != nil {
+		return nil, err
+	}
+	for i := range misses {
+		misses[i].Err = classifyRenewErr(misses[i])
+	}
+	return misses, nil
+}
+
+// classifyRenewErr 把存储层的两种没续上，收成和单条 Renew 相同的错误。
+// 被别人持有要带上当前持有者；任期变化不能伪装成 ErrHeld，否则上层会把本节点的会话踢掉。
+func classifyRenewErr(m store.LeaseMiss) error {
+	switch {
+	case errors.Is(m.Err, store.ErrLeaseHeld):
+		return &HeldError{Owner: m.Owner}
+	case errors.Is(m.Err, store.ErrLeaseTerm):
+		return errTermChanged
+	default:
+		return m.Err
+	}
+}
+
 // Release 交出租约。until 置 0 且清掉持有者，下一个 Claim 可以立刻接手。
 // term 为 0 时只要自己还持有就释放；非 0 时任期不符说明已经被别人接走过，保持原样。
 func Release(ctx context.Context, backend store.Locker, serverID int32, key, self string, term uint64) error {

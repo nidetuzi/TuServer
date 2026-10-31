@@ -159,6 +159,17 @@ type dropOnce struct {
 
 func (d *dropOnce) MutateLease(ctx context.Context, serverID int32, key string, fn func(store.LeaseRec) (store.LeaseRec, error)) (store.LeaseRec, error) {
 	rec, err := d.Locker.MutateLease(ctx, serverID, key, fn)
+	d.forget()
+	return rec, err
+}
+
+func (d *dropOnce) RenewMany(ctx context.Context, items []store.LeaseTouch) ([]store.LeaseMiss, error) {
+	misses, err := d.Locker.RenewMany(ctx, items)
+	d.forget()
+	return misses, err
+}
+
+func (d *dropOnce) forget() {
 	d.once.Do(func() {
 		d.app.mu.Lock()
 		for id, s := range d.app.sessions {
@@ -166,10 +177,13 @@ func (d *dropOnce) MutateLease(ctx context.Context, serverID int32, key string, 
 				delete(d.app.sessions, id)
 			}
 		}
-		delete(d.app.bound, playerActorKey(serverID, d.player))
+		for k, b := range d.app.bound {
+			if b.PlayerID == d.player {
+				delete(d.app.bound, k)
+			}
+		}
 		d.app.mu.Unlock()
 	})
-	return rec, err
 }
 
 func onlineApp(t *testing.T) (*App, *memory.Store, *[]string, time.Time) {
@@ -210,6 +224,107 @@ func login(t *testing.T, app *App, gate, sid string, player int64) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRenewMissDoesNotAskRelease(t *testing.T) {
+	app, st, _, now := onlineApp(t)
+	defer app.Stop()
+	login(t, app, "gate-a", "s1", 7)
+	var asked atomic.Int32
+	app.Hooks.AskRelease = func(context.Context, string, []byte) error {
+		asked.Add(1)
+		return nil
+	}
+	key := playerLeaseKey(1, 7)
+	if err := lease.Release(context.Background(), st, 1, key, "logic-a", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lease.Claim(context.Background(), st, 1, key, "logic-b", "g", "s", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	app.RenewLeases(context.Background())
+	if asked.Load() != 0 {
+		t.Fatalf("续租失败不应要求对方交出租约: %d", asked.Load())
+	}
+	if _, err := lease.Claim(context.Background(), st, 1, key, "logic-c", "g", "s2", now, time.Second); err == nil {
+		t.Fatal("失败的续租不应把租约抢回来")
+	}
+	if len(app.Sessions(1)) != 0 {
+		t.Fatal("租约已被别人持有时应清掉本地会话")
+	}
+}
+
+func TestRenewExtendsOwnLease(t *testing.T) {
+	app, st, _, start := onlineApp(t)
+	defer app.Stop()
+	clock := start
+	app.Hooks.Now = func() time.Time { return clock }
+	login(t, app, "gate-a", "s1", 7)
+	clock = start.Add(10 * time.Second)
+	app.RenewLeases(context.Background())
+	key := playerLeaseKey(1, 7)
+	// 登录时的到期点是 start+TTL。若没续上，start+20s 时别的节点已经可以接手。
+	if _, err := lease.Claim(context.Background(), st, 1, key, "other", "g", "s", start.Add(20*time.Second), time.Second); err == nil {
+		t.Fatal("续租后原到期点之后仍应拒绝别的节点")
+	}
+}
+
+func TestDropGateCapsConcurrency(t *testing.T) {
+	app, _, _, _ := onlineApp(t)
+	defer app.Stop()
+	const n = 6
+	for i := 0; i < n; i++ {
+		login(t, app, "gate-a", "s"+strconv.Itoa(i), int64(100+i))
+	}
+	app.ReapParallel = 2
+	var cur, max atomic.Int32
+	started := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	defer letGo()
+	app.Hooks.FlushID = func(context.Context, int32, string, int64) error {
+		c := cur.Add(1)
+		for {
+			m := max.Load()
+			if c <= m || max.CompareAndSwap(m, c) {
+				break
+			}
+		}
+		if c == 2 {
+			once.Do(func() { close(started) })
+		}
+		<-release
+		cur.Add(-1)
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		app.ReapGates(context.Background(), nil, 1)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("清理没有并发起来")
+	}
+	time.Sleep(30 * time.Millisecond)
+	if max.Load() > 2 {
+		t.Fatalf("并发超过上限: %d", max.Load())
+	}
+	letGo()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("清理没有结束")
+	}
+	if max.Load() != 2 {
+		t.Fatalf("应达到并发上限: %d", max.Load())
+	}
+	if len(app.Sessions(1)) != 0 {
+		t.Fatal("会话应清完")
 	}
 }
 

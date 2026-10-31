@@ -474,17 +474,30 @@ func (h *holdLocker) Arm() {
 }
 
 func (h *holdLocker) MutateLease(ctx context.Context, serverID int32, key string, fn func(store.LeaseRec) (store.LeaseRec, error)) (store.LeaseRec, error) {
-	h.mu.Lock()
-	block := h.armed
-	if block {
-		h.armed = false
-	}
-	h.mu.Unlock()
-	if block {
+	if h.blockOnce() {
 		close(h.started)
 		<-h.resume
 	}
 	return h.inner.MutateLease(ctx, serverID, key, fn)
+}
+
+// RenewMany 是续租现在的写入入口。并发用例要停在批量写之前，交接才插得进窗口。
+func (h *holdLocker) RenewMany(ctx context.Context, items []store.LeaseTouch) ([]store.LeaseMiss, error) {
+	if h.blockOnce() {
+		close(h.started)
+		<-h.resume
+	}
+	return h.inner.RenewMany(ctx, items)
+}
+
+func (h *holdLocker) blockOnce() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.armed {
+		return false
+	}
+	h.armed = false
+	return true
 }
 
 type fenceDoc struct {

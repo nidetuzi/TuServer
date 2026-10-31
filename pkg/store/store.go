@@ -37,9 +37,36 @@ type LeaseRec struct {
 	Found   bool
 }
 
+// LeaseTouch 是一次只延长到期时间的续期。
+// Owner 和 Term 是匹配条件：对不上就不动这条记录，续期不能把已经交出去的租约抢回来。
+type LeaseTouch struct {
+	ServerID int32
+	Key      string
+	Owner    string
+	Term     uint64
+	Until    int64
+}
+
+// LeaseMiss 是没有续上的一条。
+// Owner 是库里现在的持有者，不存在或已释放时为空。Err 用来区分被别人持有和任期已经变了。
+type LeaseMiss struct {
+	ServerID int32
+	Key      string
+	Owner    string
+	Err      error
+}
+
+// ErrLeaseHeld 表示租约不存在、已释放，或持有者不是这次给出的 owner。调用方应放弃本地会话，不能据此去抢。
+var ErrLeaseHeld = errors.New("store: lease held")
+
+// ErrLeaseTerm 表示租约仍由该 owner 持有，但已经不是这次记录的任期。不能当成被别人持有，否则会把本节点仍在线的会话踢掉。
+var ErrLeaseTerm = errors.New("store: lease term changed")
+
 // Locker 用比较并交换保存租约。fn 返回错误时不得写入。
+// RenewMany 把多条续期合成一次写，只延长仍然由给定 owner 和 term 持有的租约。
 type Locker interface {
 	MutateLease(ctx context.Context, serverID int32, key string, fn func(LeaseRec) (LeaseRec, error)) (LeaseRec, error)
+	RenewMany(ctx context.Context, items []LeaseTouch) ([]LeaseMiss, error)
 }
 
 // Versioned 是带代数和任期的落库快照。没有实现该接口的文档不做条件写。

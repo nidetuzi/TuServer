@@ -6,8 +6,52 @@ import (
 	"testing"
 	"time"
 
+	"tuserv/pkg/store"
 	"tuserv/pkg/store/memory"
 )
+
+func TestRenewOwnReportsMisses(t *testing.T) {
+	mem := memory.New()
+	ctx := context.Background()
+	now := time.Unix(2000, 0)
+	if _, err := Claim(ctx, mem, 1, "player/1/1", "node-a", "g", "s1", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Claim(ctx, mem, 1, "player/1/2", "node-b", "g", "s2", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	until := now.Add(2 * time.Minute).UnixMilli()
+	misses, err := RenewOwn(ctx, mem, []store.LeaseTouch{
+		{ServerID: 1, Key: "player/1/1", Owner: "node-a", Term: 1, Until: until},
+		{ServerID: 1, Key: "player/1/2", Owner: "node-a", Term: 1, Until: until},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(misses) != 1 || misses[0].Key != "player/1/2" || !errors.Is(misses[0].Err, ErrHeld) {
+		t.Fatalf("只应报告不属于自己的那条: %+v", misses)
+	}
+	var held *HeldError
+	if !errors.As(misses[0].Err, &held) || held.Owner != "node-b" {
+		t.Fatalf("应带回当前持有者: %+v", misses[0].Err)
+	}
+	_, err = Claim(ctx, mem, 1, "player/1/2", "node-c", "g", "s3", now.Add(time.Second), time.Minute)
+	if !errors.Is(err, ErrHeld) {
+		t.Fatalf("失败的续期不应抢走 node-b 的租约: %v", err)
+	}
+	if _, err := mem.MutateLease(ctx, 1, "player/1/1", func(cur store.LeaseRec) (store.LeaseRec, error) {
+		cur.Term++
+		return cur, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	termMiss, err := RenewOwn(ctx, mem, []store.LeaseTouch{
+		{ServerID: 1, Key: "player/1/1", Owner: "node-a", Term: 1, Until: until + 1},
+	})
+	if err != nil || len(termMiss) != 1 || !errors.Is(termMiss[0].Err, errTermChanged) || errors.Is(termMiss[0].Err, ErrHeld) {
+		t.Fatalf("任期变化不能当成被别人持有: %+v %v", termMiss, err)
+	}
+}
 
 func TestClaimSingleHolder(t *testing.T) {
 	mem := memory.New()

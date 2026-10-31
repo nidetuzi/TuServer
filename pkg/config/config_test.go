@@ -43,6 +43,21 @@ func TestLoadClusterSecret(t *testing.T) {
 	}
 }
 
+func TestRenewEveryAndReapParallel(t *testing.T) {
+	var empty File
+	if empty.RenewEvery() != 5*time.Second || empty.ReapParallel() != 8 {
+		t.Fatalf("缺省续租或清理并发不对: renew=%s parallel=%d", empty.RenewEvery(), empty.ReapParallel())
+	}
+	bad := File{RenewInterval: "1m", GateReapParallel: 0}
+	if bad.RenewEvery() != 5*time.Second || bad.ReapParallel() != 8 {
+		t.Fatal("不小于 TTL 的续租间隔和非法并发应退回默认")
+	}
+	ok := File{RenewInterval: "4s", GateReapParallel: 3}
+	if ok.RenewEvery() != 4*time.Second || ok.ReapParallel() != 3 {
+		t.Fatalf("合法配置应保留: renew=%s parallel=%d", ok.RenewEvery(), ok.ReapParallel())
+	}
+}
+
 func TestClientIdleAndGateProbe(t *testing.T) {
 	var empty File
 	if empty.ClientIdle() != 60*time.Second || empty.GateProbeEvery() != 5*time.Second || empty.GateMissLimit() != 2 {

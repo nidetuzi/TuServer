@@ -1,5 +1,5 @@
 // Package main 启动逻辑节点。
-// 刷盘定时器和 Kitex 分开跑，协议处理仍在玩家 actor 里串行。
+// 续租、刷盘和失联网关清理各自一个循环，协议处理仍在玩家 actor 里串行。
 package main
 
 import (
@@ -122,6 +122,7 @@ func main() {
 		os.Exit(1)
 	}
 	svr := logiccli.NewServer(&logicAPI{app: app, nodes: nodes}, opts...)
+	app.ReapParallel = cfg.ReapParallel()
 	stopTicker := make(chan struct{})
 	var tickerOnce sync.Once
 	tickerDone := make(chan struct{})
@@ -129,33 +130,32 @@ func main() {
 	misses := cfg.GateMissLimit()
 	go func() {
 		defer close(tickerDone)
-		flushTick := time.NewTicker(cfg.FlushEvery())
-		probeTick := time.NewTicker(probeEvery)
-		defer flushTick.Stop()
-		defer probeTick.Stop()
-		for {
-			select {
-			case <-stopTicker:
-				return
-			case <-flushTick.C:
-				app.RenewLeases(context.Background())
-				if err := c.Flush(context.Background()); err != nil {
+		logic.Loops{
+			RenewEvery: cfg.RenewEvery(),
+			FlushEvery: cfg.FlushEvery(),
+			ProbeEvery: probeEvery,
+			Renew: func(ctx context.Context) {
+				app.RenewLeases(ctx)
+			},
+			Flush: func(ctx context.Context) {
+				if err := c.Flush(ctx); err != nil {
 					log.Error("flush failed", "err", err)
 				}
-				if err := c.Evict(context.Background()); err != nil {
+				if err := c.Evict(ctx); err != nil {
 					log.Error("evict failed", "err", err)
 				}
-			case <-probeTick.C:
-				ctx, cancel := context.WithTimeout(context.Background(), probeEvery)
-				addrs, err := nodes.Gates(ctx)
+			},
+			Probe: func(ctx context.Context) {
+				pctx, cancel := context.WithTimeout(ctx, probeEvery)
+				addrs, err := nodes.Gates(pctx)
 				cancel()
 				if err != nil {
 					log.Warn("gate probe", "err", err)
-					continue
+					return
 				}
-				app.ReapGates(context.Background(), addrs, misses)
-			}
-		}
+				app.ReapGates(ctx, addrs, misses)
+			},
+		}.Run(stopTicker)
 	}()
 	go func() {
 		if err := svr.Run(); err != nil {
