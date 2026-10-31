@@ -186,6 +186,153 @@ func TestRenewLeasesConcurrentWithRelinquish(t *testing.T) {
 	}
 }
 
+// TestProtocolAfterLeaseTakeoverDoesNotAskRelease 覆盖失租旧连接继续发协议的路径。
+func TestProtocolAfterLeaseTakeoverDoesNotAskRelease(t *testing.T) {
+	mem := memory.New()
+	now := time.Unix(1_700_000_000, 0)
+	playerID := mustPlayerID(t, 1, 9)
+	appA := newLeaseApp(t, "node-a", mem, func() time.Time { return now })
+	appB := newLeaseApp(t, "node-b", mem, func() time.Time { return now.Add(lease.TTL + time.Second) })
+	var asks atomic.Int32
+	var kicksA, kicksB, pinsA, flushed, handled atomic.Int32
+	appA.Router.Handle(2, func(*handler.Context, []byte) ([]byte, error) {
+		handled.Add(1)
+		return nil, nil
+	})
+	appA.Hooks.PinPlayer = func(int32, int64) func() {
+		pinsA.Add(1)
+		return func() { pinsA.Add(-1) }
+	}
+	appA.Hooks.FlushID = func(context.Context, int32, string, int64) error {
+		if pinsA.Load() != 1 {
+			t.Error("失租刷盘结束前应保持缓存钉住")
+		}
+		flushed.Add(1)
+		return store.ErrStale
+	}
+	appB.Hooks.Kick = func(context.Context, string, string) { kicksB.Add(1) }
+	appA.Hooks.AskRelease = func(context.Context, string, []byte) error {
+		asks.Add(1)
+		return nil
+	}
+	appA.Hooks.Kick = func(context.Context, string, string) { kicksA.Add(1) }
+	mustOnline(t, appA, "gate-a", "sess-a", 1, playerID)
+	mustOnline(t, appB, "gate-b", "sess-b", 1, playerID)
+	before := peekLease(t, mem, 1, playerLeaseKey(1, playerID))
+	if before.Owner != "node-b" || before.Term != 2 {
+		t.Fatalf("过期后应由 B 接手: %+v", before)
+	}
+	beforeBinding, ok := appB.boundSession(Request{GateID: "gate-b", SessionID: "sess-b", ServerID: 1, PlayerID: playerID})
+	if !ok {
+		t.Fatal("B 应持有角色绑定")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := appA.Handle(ctx, Request{
+		GateID: "gate-a", SessionID: "sess-a", ServerID: 1, PlayerID: playerID, CmdID: 2,
+	}); !errors.Is(err, lease.ErrHeld) {
+		t.Fatalf("失租旧连接发协议应返回租约错误: %v", err)
+	}
+	if handled.Load() != 0 || flushed.Load() != 1 || pinsA.Load() != 0 {
+		t.Fatalf("失租后应跳过玩法、刷盘并放开钉住: handled=%d flush=%d pin=%d", handled.Load(), flushed.Load(), pinsA.Load())
+	}
+	if after := peekLease(t, mem, 1, playerLeaseKey(1, playerID)); after != before {
+		t.Fatalf("旧协议不应修改新持有者租约: before=%+v after=%+v", before, after)
+	}
+	afterBinding, ok := appB.boundSession(Request{GateID: "gate-b", SessionID: "sess-b", ServerID: 1, PlayerID: playerID})
+	if !ok {
+		t.Fatal("B 应保留角色绑定")
+	}
+	if afterBinding.Session != beforeBinding.Session || afterBinding.Term != beforeBinding.Term || kicksB.Load() != 0 {
+		t.Fatalf("新绑定不应变化或被踢: before=%+v after=%+v kicks=%d", beforeBinding, afterBinding, kicksB.Load())
+	}
+	if got := appA.Sessions(1); len(got) != 0 {
+		t.Fatalf("旧节点应删除失租会话: %+v", got)
+	}
+	if asks.Load() != 0 {
+		t.Fatalf("失租旧连接不应请求新持有者交租, 次数=%d", asks.Load())
+	}
+	if got := appB.Sessions(1); len(got) != 1 || got[0].ID != "sess-b" {
+		t.Fatalf("新会话应保持在线: %+v", got)
+	}
+	if kicksA.Load() != 1 {
+		t.Fatalf("旧会话应被踢掉, 次数=%d", kicksA.Load())
+	}
+	appA.mu.Lock()
+	_, stillBound := appA.bound[playerActorKey(1, playerID)]
+	appA.mu.Unlock()
+	if stillBound {
+		t.Fatal("失租旧节点不应保留角色绑定")
+	}
+}
+
+// TestBoundProtocolOnlyRenewsOriginalLease 防止旧连接接手空闲租约或采纳已变化的任期。
+func TestBoundProtocolOnlyRenewsOriginalLease(t *testing.T) {
+	for _, state := range []string{"released", "missing", "local_term_changed", "takeover_expired", "own_expired"} {
+		t.Run(state, func(t *testing.T) {
+			mem := memory.New()
+			now := time.Unix(1_700_000_000, 0)
+			playerID := mustPlayerID(t, 1, 9)
+			app := newLeaseApp(t, "node-a", mem, func() time.Time { return now })
+			mustOnline(t, app, "gate-a", "sess-a", 1, playerID)
+			var asks, kicks, handled atomic.Int32
+			app.Hooks.AskRelease = func(context.Context, string, []byte) error {
+				asks.Add(1)
+				return nil
+			}
+			app.Hooks.Kick = func(context.Context, string, string) { kicks.Add(1) }
+			app.Router.Handle(2, func(*handler.Context, []byte) ([]byte, error) {
+				handled.Add(1)
+				return nil, nil
+			})
+			key := playerLeaseKey(1, playerID)
+			_, err := mem.MutateLease(context.Background(), 1, key, func(cur store.LeaseRec) (store.LeaseRec, error) {
+				switch state {
+				case "released":
+					cur.Owner, cur.Until = "", 0
+				case "missing":
+					cur = store.LeaseRec{}
+				case "local_term_changed":
+					cur.Term++
+				case "takeover_expired":
+					cur.Owner, cur.Term, cur.Until = "node-b", cur.Term+1, now.Add(-time.Second).UnixMilli()
+				case "own_expired":
+					cur.Until = now.Add(-time.Second).UnixMilli()
+				}
+				return cur, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := peekLease(t, mem, 1, key)
+			_, err = app.Handle(context.Background(), Request{
+				GateID: "gate-a", SessionID: "sess-a", ServerID: 1, PlayerID: playerID, CmdID: 2,
+			})
+			after := peekLease(t, mem, 1, key)
+			if asks.Load() != 0 {
+				t.Fatal("已绑定连接不能请求交接")
+			}
+			if state == "own_expired" {
+				if err != nil || after.Term != before.Term || after.Owner != before.Owner || after.Until != now.Add(lease.TTL).UnixMilli() || handled.Load() != 1 || kicks.Load() != 0 {
+					t.Fatalf("仍持有原任期时应正常续租和处理协议: after=%+v err=%v handled=%d kicks=%d", after, err, handled.Load(), kicks.Load())
+				}
+				return
+			}
+			if err == nil || after != before || handled.Load() != 0 {
+				t.Fatalf("原任期失效后不应接手或执行玩法: before=%+v after=%+v err=%v handled=%d", before, after, err, handled.Load())
+			}
+			if state == "local_term_changed" {
+				if kicks.Load() != 0 {
+					t.Fatal("本节点任期变化沿用续租路径语义，不踢会话")
+				}
+			} else if !errors.Is(err, lease.ErrHeld) || kicks.Load() != 1 || len(app.Sessions(1)) != 0 {
+				t.Fatalf("失租应清理旧会话: err=%v kicks=%d sessions=%+v", err, kicks.Load(), app.Sessions(1))
+			}
+		})
+	}
+}
+
 // TestRenewLeasesDropsLocalWhenHeldElsewhere 覆盖绑定还在、租约已被别人接走的放弃路径。
 func TestRenewLeasesDropsLocalWhenHeldElsewhere(t *testing.T) {
 	mem := memory.New()

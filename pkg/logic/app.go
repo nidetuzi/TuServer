@@ -336,31 +336,38 @@ func (a *App) abandonLost(ctx context.Context, b binding, held error) {
 	key := playerActorKey(b.ServerID, b.PlayerID)
 	_ = a.Actors.Do(ctx, key, func() {
 		a.withGuard(func() {
-			a.mu.Lock()
-			cur, ok := a.bound[key]
-			if !ok || cur.ID != b.ID || cur.Term != b.Term || cur.GateAddr != b.GateAddr {
-				a.mu.Unlock()
-				return
-			}
-			unpin := cur.unpin
-			delete(a.bound, key)
-			delete(a.sessions, cur.ID)
-			a.mu.Unlock()
-			owner := ""
-			var herr *lease.HeldError
-			if errors.As(held, &herr) && herr != nil {
-				owner = herr.Owner
-			}
-			log.Warn("renew lease lost", "server_id", cur.ServerID, "player_id", cur.PlayerID, "session_id", cur.ID, "term", cur.Term, "owner", owner)
-			if a.Hooks.FlushID != nil {
-				_ = a.Hooks.FlushID(ctx, cur.ServerID, KindPlayer, cur.PlayerID)
-			}
-			if unpin != nil {
-				unpin()
-			}
-			a.kick(ctx, cur.GateAddr, cur.ID)
+			a.abandonLostInActor(ctx, b, held)
 		})
 	})
+}
+
+// abandonLostInActor 清理已经确认失去租约的本地绑定。
+// 协议路径本来就在角色邮箱中，直接执行可以避免再次投递同一个 actor 造成自等待。
+func (a *App) abandonLostInActor(ctx context.Context, b binding, held error) {
+	key := playerActorKey(b.ServerID, b.PlayerID)
+	a.mu.Lock()
+	cur, ok := a.bound[key]
+	if !ok || cur.ID != b.ID || cur.Term != b.Term || cur.GateAddr != b.GateAddr {
+		a.mu.Unlock()
+		return
+	}
+	unpin := cur.unpin
+	delete(a.bound, key)
+	delete(a.sessions, cur.ID)
+	a.mu.Unlock()
+	owner := ""
+	var herr *lease.HeldError
+	if errors.As(held, &herr) && herr != nil {
+		owner = herr.Owner
+	}
+	log.Warn("renew lease lost", "server_id", cur.ServerID, "player_id", cur.PlayerID, "session_id", cur.ID, "term", cur.Term, "owner", owner)
+	if a.Hooks.FlushID != nil {
+		_ = a.Hooks.FlushID(ctx, cur.ServerID, KindPlayer, cur.PlayerID)
+	}
+	if unpin != nil {
+		unpin()
+	}
+	a.kick(ctx, cur.GateAddr, cur.ID)
 }
 
 // ReapGates 按本轮仍注册着的网关地址清理失联会话。
@@ -457,6 +464,13 @@ func (a *App) stale(req Request) bool {
 	defer a.mu.Unlock()
 	b, ok := a.bound[playerActorKey(req.ServerID, req.PlayerID)]
 	return ok && b.ID != "" && req.SessionID != "" && b.ID != req.SessionID
+}
+
+func (a *App) boundSession(req Request) (binding, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	b, ok := a.bound[playerActorKey(req.ServerID, req.PlayerID)]
+	return b, ok && b.ID == req.SessionID && b.GateAddr == req.GateID
 }
 
 func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term uint64) {
@@ -676,6 +690,21 @@ func (a *App) enter(ctx context.Context, req Request) (uint64, error) {
 		now = a.Hooks.Now()
 	}
 	key := playerLeaseKey(req.ServerID, req.PlayerID)
+	if b, bound := a.boundSession(req); bound {
+		// 已绑定连接只能延长原任期，不能接手已释放的租约、采纳新任期或要求新持有者交出。
+		// enter 已在 Guard 和角色邮箱内，失租清理不能同步投递回同一个 actor。
+		rec, err := lease.Renew(ctx, a.Hooks.Leases, req.ServerID, key, a.Hooks.Self, b.Term, now, lease.TTL)
+		if err != nil {
+			if errors.Is(err, lease.ErrHeld) {
+				a.abandonLostInActor(ctx, b, err)
+			}
+			return 0, err
+		}
+		if a.Hooks.Touch != nil {
+			a.Hooks.Touch(ctx, req.ServerID, req.PlayerID, rec.Term)
+		}
+		return rec.Term, nil
+	}
 	rec, err := lease.Claim(ctx, a.Hooks.Leases, req.ServerID, key, a.Hooks.Self, req.GateID, req.SessionID, now, lease.TTL)
 	if err != nil {
 		held, ok := err.(*lease.HeldError)
