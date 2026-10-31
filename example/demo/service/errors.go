@@ -4,6 +4,8 @@ import "tuserv/pkg/errcode"
 
 // 这些哨兵把参数错误和库存不足分开。客户端只看错误码，服务端仍用 errors.Is 区分同码的不同原因。
 var (
+	// ErrBadUsername 表示渠道用户名为空或超过 256 字节。
+	ErrBadUsername = errcode.New(errcode.BadArg, "service: bad username")
 	// ErrBadName 表示角色或公会名字为空，或超过 16 字节。
 	ErrBadName = errcode.New(errcode.BadArg, "service: bad name")
 	// ErrBadExp 表示经验不是正数。

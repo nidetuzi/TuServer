@@ -22,7 +22,8 @@ func Example() {
 	defer tasks.Shutdown(context.Background())
 	st := memory.New()
 	players := service.NewPlayerService(cache.New(st), st, event.New())
-	app := logic.New(router.New[int32](), players.GetByID)
+	app := logic.New(router.New[int32](), nil)
+	app.KeyLoad = players.GetByKey
 	app.Scheduler = tasks
 	defer app.Stop()
 	app.Hooks.OnOnline = func(session logic.Session) {

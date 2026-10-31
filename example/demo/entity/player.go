@@ -15,13 +15,15 @@ type Player struct {
 	OID          primitive.ObjectID `bson:"_id"`
 	PlayerID     int64              `bson:"id"`
 	Server       int32              `bson:"server_id"`
-	Name         string             `bson:"name"`
-	Level        int32              `bson:"level"`
-	Exp          int32              `bson:"exp"`
-	Bag          map[int32]int32    `bson:"bag"`
-	GuildID      int64              `bson:"guild_id"`
-	Rev          uint64             `bson:"rev,omitempty"`
-	Fence        uint64             `bson:"fence,omitempty"`
+	// Username 保存渠道账号身份，独立于可展示和修改的角色昵称。
+	Username string          `bson:"username"`
+	Name     string          `bson:"name"`
+	Level    int32           `bson:"level"`
+	Exp      int32           `bson:"exp"`
+	Bag      map[int32]int32 `bson:"bag"`
+	GuildID  int64           `bson:"guild_id"`
+	Rev      uint64          `bson:"rev,omitempty"`
+	Fence    uint64          `bson:"fence,omitempty"`
 	// LastOfflineAt 保存服务器确认离线的 Unix 秒，不把进程崩溃伪装成正常断线。
 	LastOfflineAt int64 `bson:"last_offline_at,omitempty"`
 	// LastLoginAt 保存最近一次成功上线的 Unix 秒，在线检查不修改登录时间。
@@ -177,7 +179,7 @@ func (p *Player) Persist() (uint64, any) {
 			bag[k] = v
 		}
 		doc = playerDoc{
-			OID: p.OID, PlayerID: p.PlayerID, Server: p.Server, Name: p.Name,
+			OID: p.OID, PlayerID: p.PlayerID, Server: p.Server, Username: p.Username, Name: p.Name,
 			Level: p.Level, Exp: p.Exp, Bag: bag, GuildID: p.GuildID, Fence: p.Fence,
 			LastOfflineAt: p.LastOfflineAt, LastLoginAt: p.LastLoginAt,
 		}
@@ -198,6 +200,7 @@ type playerDoc struct {
 	OID           primitive.ObjectID `bson:"_id"`
 	PlayerID      int64              `bson:"id"`
 	Server        int32              `bson:"server_id"`
+	Username      string             `bson:"username"`
 	Name          string             `bson:"name"`
 	Level         int32              `bson:"level"`
 	Exp           int32              `bson:"exp"`

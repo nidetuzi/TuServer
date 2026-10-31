@@ -237,7 +237,7 @@ func guildPlayer(t *testing.T, players *PlayerService, name string) (*entity.Pla
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := handler.New(context.Background(), handler.Meta{ServerID: 1, PlayerID: p.PlayerID}).WithLoader(players.GetByID)
+	ctx := handler.New(context.Background(), handler.Meta{ServerID: 1, PlayerID: p.PlayerID, PlayerKey: p.CacheKey()}).WithKeyLoader(players.GetByKey)
 	return p, ctx
 }
 

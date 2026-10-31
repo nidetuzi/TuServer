@@ -26,6 +26,8 @@ type Request struct {
 	SessionID string
 	ServerID  int32
 	PlayerID  int64
+	// PlayerKey 仅在节点内部传递，后续请求从本地会话恢复。
+	PlayerKey string
 	CmdID     int32
 	Body      []byte
 	// Internal 为真时才允许 0 和负数协议号。
@@ -47,8 +49,10 @@ var ErrInternalCmd = errors.New("logic: unknown internal cmd")
 // Response 带回角色编号，网关才能在登录后把 playerId 记到会话上。
 type Response struct {
 	PlayerID int64
-	CmdID    int32
-	Body     []byte
+	// PlayerKey 保存登录解析出的内部实体主键，不需要返回客户端。
+	PlayerKey string
+	CmdID     int32
+	Body      []byte
 }
 
 // Session 是本节点上的一条在线会话，区服广播时用 GateAddr 推回去。
@@ -56,7 +60,9 @@ type Session struct {
 	ID       string
 	ServerID int32
 	PlayerID int64
-	GateAddr string
+	// PlayerKey 保存登录解析出的内部实体主键，不需要返回客户端。
+	PlayerKey string
+	GateAddr  string
 }
 
 type binding struct {
@@ -74,6 +80,12 @@ type Hooks struct {
 	OnPlayerOnline func(*handler.Context) error
 	// OnPlayerOffline 在正常断线刷盘前执行，失租或陈旧清理不调用以免修改无写权的实体。
 	OnPlayerOffline func(*handler.Context) error
+	// TouchKey 按实体主键更新任期，不通过业务编号反查。
+	TouchKey func(ctx context.Context, serverID int32, key string, term uint64)
+	// FlushKey 按实体主键刷盘并移除角色缓存。
+	FlushKey func(ctx context.Context, serverID int32, key string) error
+	// PinKey 使用实体主键钉住在线角色。
+	PinKey func(serverID int32, key string) func()
 	// Self 是本节点对外地址，租约持有者和它比较。
 	Self string
 	// Leases 保存跨节点任期。为空时只在本进程内按角色串行。
@@ -105,7 +117,9 @@ type App struct {
 	Router *router.Router[int32]
 	Actors *actor.System
 	Load   handler.Loader
-	Hooks  Hooks
+	// KeyLoad 配置后，角色读取只使用会话中的实体主键。
+	KeyLoad handler.KeyLoader
+	Hooks   Hooks
 	// Scheduler 在服务接入前配置，业务任务必须先于邮箱停机。
 	Scheduler   *scheduler.Scheduler
 	playerTasks map[string]map[string]*scheduler.Task
@@ -183,6 +197,7 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 	}
 	if req.PlayerID == 0 && resp.PlayerID > 0 && req.SessionID != "" {
 		req.PlayerID = resp.PlayerID
+		req.PlayerKey = resp.PlayerKey
 		var onlineErr error
 		if err := a.Actors.Do(ctx, playerActorKey(req.ServerID, req.PlayerID), func() {
 			defer func() {
@@ -215,6 +230,13 @@ func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, bi
 		a.kick(ctx, req.GateID, req.SessionID)
 		return
 	}
+	if req.PlayerID > 0 {
+		req.PlayerKey = a.playerKey(req)
+		if a.KeyLoad != nil && req.PlayerKey == "" {
+			*biz = handler.ErrNotLoggedIn
+			return
+		}
+	}
 	wasPlayer := req.PlayerID > 0
 	term := uint64(0)
 	if req.PlayerID > 0 {
@@ -230,10 +252,11 @@ func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, bi
 	hctx := handler.New(ctx, handler.Meta{
 		ServerID:  req.ServerID,
 		PlayerID:  req.PlayerID,
+		PlayerKey: req.PlayerKey,
 		SessionID: req.SessionID,
 		GateID:    req.GateID,
 		CmdID:     req.CmdID,
-	}).WithLoader(a.Load).WithBind(func(id int64) {
+	}).WithLoader(a.Load).WithKeyLoader(a.KeyLoad).WithBind(func(id int64) {
 		req.PlayerID = id
 	})
 	body, dispatchErr := a.Router.Dispatch(req.CmdID, hctx, req.Body)
@@ -241,7 +264,8 @@ func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, bi
 		*biz = dispatchErr
 		return
 	}
-	*resp = Response{PlayerID: hctx.PlayerID, CmdID: req.CmdID, Body: body}
+	req.PlayerKey = hctx.PlayerKey
+	*resp = Response{PlayerID: hctx.PlayerID, PlayerKey: hctx.PlayerKey, CmdID: req.CmdID, Body: body}
 	// 首次登录先离开会话邮箱，再由 Handle 进入角色邮箱申请写权并执行上线业务。
 	if hctx.PlayerID > 0 && req.SessionID != "" && wasPlayer {
 		*fatal = a.completeOnline(ctx, req, term)
@@ -401,9 +425,7 @@ func (a *App) abandonLostInActor(ctx context.Context, b binding, held error) {
 		owner = herr.Owner
 	}
 	log.Warn("renew lease lost", "server_id", cur.ServerID, "player_id", cur.PlayerID, "session_id", cur.ID, "term", cur.Term, "owner", owner)
-	if a.Hooks.FlushID != nil {
-		_ = a.Hooks.FlushID(ctx, cur.ServerID, KindPlayer, cur.PlayerID)
-	}
+	_ = a.flushPlayer(ctx, cur.Session)
 	if unpin != nil {
 		unpin()
 	}
@@ -518,14 +540,16 @@ func (a *App) boundSession(req Request) (binding, bool) {
 
 func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term uint64) {
 	key := playerActorKey(req.ServerID, playerID)
-	sess := Session{ID: req.SessionID, ServerID: req.ServerID, PlayerID: playerID, GateAddr: req.GateID}
+	sess := Session{ID: req.SessionID, ServerID: req.ServerID, PlayerID: playerID, PlayerKey: req.PlayerKey, GateAddr: req.GateID}
 	a.mu.Lock()
 	prev, exists := a.bound[key]
 	needPin := !exists || prev.unpin == nil
 	a.mu.Unlock()
 	// 同一角色在线期间只钉一次。每次协议都钉，断线只放开一次，引用会计数漏掉。
 	var pinned func()
-	if needPin && a.Hooks.PinPlayer != nil {
+	if needPin && a.Hooks.PinKey != nil {
+		pinned = a.Hooks.PinKey(req.ServerID, req.PlayerKey)
+	} else if needPin && a.Hooks.PinPlayer != nil {
 		pinned = a.Hooks.PinPlayer(req.ServerID, playerID)
 	}
 	var drop []func()
@@ -607,13 +631,12 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 				}
 				return
 			}
+			req.PlayerKey = b.PlayerKey
 			if err := a.beforePlayerOffline(ctx, req); err != nil {
 				offlineErr = err
 				return
 			}
-			if a.Hooks.FlushID != nil {
-				_ = a.Hooks.FlushID(ctx, req.ServerID, "player", req.PlayerID)
-			}
+			_ = a.flushPlayer(ctx, b.Session)
 			if a.Hooks.Leases != nil {
 				_ = lease.Release(ctx, a.Hooks.Leases, req.ServerID, playerLeaseKey(req.ServerID, req.PlayerID), a.Hooks.Self, b.Term)
 			}
@@ -765,9 +788,7 @@ func (a *App) enter(ctx context.Context, req Request) (uint64, error) {
 			}
 			return 0, err
 		}
-		if a.Hooks.Touch != nil {
-			a.Hooks.Touch(ctx, req.ServerID, req.PlayerID, rec.Term)
-		}
+		a.touchPlayer(ctx, req, rec.Term)
 		return rec.Term, nil
 	}
 	rec, err := lease.Claim(ctx, a.Hooks.Leases, req.ServerID, key, a.Hooks.Self, req.GateID, req.SessionID, now, lease.TTL)
@@ -791,9 +812,7 @@ func (a *App) enter(ctx context.Context, req Request) (uint64, error) {
 			return 0, err
 		}
 	}
-	if a.Hooks.Touch != nil {
-		a.Hooks.Touch(ctx, req.ServerID, req.PlayerID, rec.Term)
-	}
+	a.touchPlayer(ctx, req, rec.Term)
 	return rec.Term, nil
 }
 
@@ -831,7 +850,9 @@ func (a *App) relinquish(ctx context.Context, body []byte) error {
 				delete(a.sessions, b.ID)
 			}
 			a.mu.Unlock()
-			if a.Hooks.FlushID != nil {
+			if ok {
+				_ = a.flushPlayer(ctx, b.Session)
+			} else if a.Hooks.FlushKey == nil && a.Hooks.FlushID != nil {
 				_ = a.Hooks.FlushID(ctx, rel.ServerID, KindPlayer, rel.ID)
 			}
 			if a.Hooks.Leases != nil {

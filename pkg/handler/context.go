@@ -13,10 +13,15 @@ var ErrNotLoggedIn = errors.New("handler: player not logged in")
 // Loader 按区服和角色编号读取角色。实现必须走缓存的 Get。
 type Loader func(ctx context.Context, serverID int32, playerID int64) (any, error)
 
+// KeyLoader 按登录解析出的实体主键读取角色，避免后续请求反查业务编号。
+type KeyLoader func(ctx context.Context, serverID int32, playerKey string) (any, error)
+
 // Meta 是从帧和会话上复制来的身份，处理函数用它选库和打日志。
 type Meta struct {
-	ServerID  int32
-	PlayerID  int64
+	ServerID int32
+	PlayerID int64
+	// PlayerKey 是服务端登录解析出的 ObjectID，不从客户端帧读取。
+	PlayerKey string
 	SessionID string
 	GateID    string
 	CmdID     int32
@@ -26,8 +31,9 @@ type Meta struct {
 type Context struct {
 	context.Context
 	Meta
-	load Loader
-	bind func(playerID int64)
+	load    Loader
+	keyLoad KeyLoader
+	bind    func(playerID int64)
 }
 
 // New 创建上下文。load 为空时 GetPlayer 会失败，登录以外的协议都需要它。
@@ -44,6 +50,12 @@ func (c *Context) WithLoader(load Loader) *Context {
 	return c
 }
 
+// WithKeyLoader 注入按实体主键读取的入口，配置后不回退到业务编号查询。
+func (c *Context) WithKeyLoader(load KeyLoader) *Context {
+	c.keyLoad = load
+	return c
+}
+
 // WithBind 在登录成功后把角色编号交回会话，响应里才能带上 playerId。
 func (c *Context) WithBind(bind func(playerID int64)) *Context {
 	c.bind = bind
@@ -55,14 +67,23 @@ func (c *Context) GetPlayer() (any, error) {
 	if c.PlayerID == 0 {
 		return nil, ErrNotLoggedIn
 	}
+	if c.keyLoad != nil {
+		if c.PlayerKey == "" {
+			return nil, ErrNotLoggedIn
+		}
+		return c.keyLoad(c.Context, c.ServerID, c.PlayerKey)
+	}
 	if c.load == nil {
 		return nil, errors.New("handler: player loader is not set")
 	}
 	return c.load(c.Context, c.ServerID, c.PlayerID)
 }
 
-// BindPlayer 记录本次请求产生的角色编号，并通知外层会话。
-func (c *Context) BindPlayer(playerID int64) {
+// BindPlayer 记录业务编号和可选的实体主键，后续角色访问优先使用实体主键。
+func (c *Context) BindPlayer(playerID int64, playerKey ...string) {
+	if len(playerKey) > 0 {
+		c.PlayerKey = playerKey[0]
+	}
 	c.PlayerID = playerID
 	if c.bind != nil {
 		c.bind(playerID)

@@ -90,7 +90,8 @@ func main() {
 	players := service.NewPlayerService(c, store, bus).WithDayClock(dayLocation, time.Now)
 	chat := service.NewChatService(&notifyAll{nodes: nodes})
 	r := router.New[int32]()
-	app = logic.New(r, players.GetByID)
+	app = logic.New(r, nil)
+	app.KeyLoad = players.GetByKey
 	app.Scheduler = tasks
 	self := cfg.AdvertiseAddr
 	if self == "" {
@@ -105,14 +106,23 @@ func main() {
 			_, err := nodes.Dispatch(ctx, host, logic.Request{GateID: logic.InternalCaller, CmdID: logic.CmdRelinquish, Internal: true, Body: body})
 			return err
 		},
-		Touch: func(ctx context.Context, serverID int32, playerID int64, term uint64) {
-			v, err := players.GetByID(ctx, serverID, playerID)
+		TouchKey: func(ctx context.Context, serverID int32, key string, term uint64) {
+			v, err := players.GetByKey(ctx, serverID, key)
 			if err != nil {
 				return
 			}
 			if p, ok := v.(*demoentity.Player); ok {
 				p.SetFence(term)
 			}
+		},
+		FlushKey: func(ctx context.Context, serverID int32, key string) error {
+			e, err := c.Get(ctx, serverID, "player", key, nil)
+			if err != nil {
+				return nil
+			}
+			err = c.FlushEntity(ctx, e)
+			c.Forget(e)
+			return err
 		},
 		FlushID: func(ctx context.Context, serverID int32, collection string, id int64) error {
 			e, err := c.Get(ctx, serverID, collection, strconv.FormatInt(id, 10), nil)
@@ -127,8 +137,8 @@ func main() {
 			_ = nodes.Push(ctx, gateAddr, sessionID, logic.CmdKick, nil)
 		},
 		Guard: c.Guard,
-		PinPlayer: func(serverID int32, playerID int64) func() {
-			return c.PinKey(serverID, "player", strconv.FormatInt(playerID, 10))
+		PinKey: func(serverID int32, key string) func() {
+			return c.PinKey(serverID, "player", key)
 		},
 	}
 	demo.BindPlayerLifecycle(app, players)

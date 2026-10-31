@@ -45,7 +45,8 @@ func TestDemoFlows(t *testing.T) {
 	chatBus := &recordBroadcaster{ch: make(chan int32, 1)}
 	chat := service.NewChatService(chatBus)
 	r := router.New[int32]()
-	app := logic.New(r, players.GetByID)
+	app := logic.New(r, nil)
+	app.KeyLoad = players.GetByKey
 	defer app.Stop()
 	owners := owner.NewLocal(app.Actors)
 	guilds := service.NewGuildService(c, mem, owners)
@@ -55,7 +56,7 @@ func TestDemoFlows(t *testing.T) {
 	app.Owners = owners
 	Register(r, Deps{Players: players, Bags: bags, Chat: chat, Guilds: guilds, Bus: bus})
 
-	loginBody, _ := proto.Marshal(&game.LoginReq{Name: "ann"})
+	loginBody, _ := proto.Marshal(&game.LoginReq{Username: "ann"})
 	resp, err := app.Handle(context.Background(), logic.Request{
 		SessionID: "s1", ServerID: 3, CmdID: handler.CmdLogin, Body: loginBody, GateID: "127.0.0.1:9001",
 	})
@@ -72,7 +73,7 @@ func TestDemoFlows(t *testing.T) {
 
 	upBody, _ := proto.Marshal(&game.LevelUpReq{Exp: 100})
 	resp, err = app.Handle(context.Background(), logic.Request{
-		SessionID: "s1", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdLevelUp, Body: upBody,
+		SessionID: "s1", GateID: "127.0.0.1:9001", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdLevelUp, Body: upBody,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -94,12 +95,12 @@ func TestDemoFlows(t *testing.T) {
 
 	useBody, _ := proto.Marshal(&game.UseItemReq{ItemId: entity.RewardItemID, Count: 1})
 	if _, err := app.Handle(context.Background(), logic.Request{
-		SessionID: "s1", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdUseItem, Body: useBody,
+		SessionID: "s1", GateID: "127.0.0.1:9001", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdUseItem, Body: useBody,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	resp, err = app.Handle(context.Background(), logic.Request{
-		SessionID: "s1", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdUseItem, Body: useBody,
+		SessionID: "s1", GateID: "127.0.0.1:9001", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdUseItem, Body: useBody,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +115,7 @@ func TestDemoFlows(t *testing.T) {
 
 	chatBody, _ := proto.Marshal(&game.ChatReq{Text: "hi"})
 	if _, err := app.Handle(context.Background(), logic.Request{
-		SessionID: "s1", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdChat, Body: chatBody,
+		SessionID: "s1", GateID: "127.0.0.1:9001", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdChat, Body: chatBody,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestDemoFlows(t *testing.T) {
 
 	gBody, _ := proto.Marshal(&game.CreateGuildReq{Name: "lions"})
 	resp, err = app.Handle(context.Background(), logic.Request{
-		SessionID: "s1", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdCreateGuild, Body: gBody,
+		SessionID: "s1", GateID: "127.0.0.1:9001", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdCreateGuild, Body: gBody,
 	})
 	if err != nil {
 		t.Fatal(err)

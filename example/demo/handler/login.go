@@ -6,18 +6,18 @@ import (
 	"tuserv/pkg/handler"
 )
 
-// OnLogin 校验名字并创建或读取角色。名字规则在这里先挡一层，service 里再挡一次是为了非协议入口也不能绕过。
+// OnLogin 使用渠道用户名登录，避免把角色昵称当作账号身份。
 func OnLogin(svc *service.PlayerService) func(*handler.Context, *game.LoginReq) (*game.LoginResp, error) {
 	return func(ctx *handler.Context, req *game.LoginReq) (*game.LoginResp, error) {
-		if req.GetName() == "" || len(req.GetName()) > 16 {
-			return nil, service.ErrBadName
+		if req.GetUsername() == "" || len(req.GetUsername()) > 256 {
+			return nil, service.ErrBadUsername
 		}
-		p, err := svc.Login(ctx, ctx.ServerID, req.GetName())
+		p, err := svc.Login(ctx, ctx.ServerID, req.GetUsername())
 		if err != nil {
 			return nil, err
 		}
 		view := p.Snapshot()
-		ctx.BindPlayer(view.PlayerID)
+		ctx.BindPlayer(view.PlayerID, p.CacheKey())
 		return &game.LoginResp{PlayerId: view.PlayerID, Level: view.Level, Exp: view.Exp}, nil
 	}
 }

@@ -99,7 +99,7 @@ func (a *App) runPlayerTask(ctx context.Context, b binding, task *scheduler.Task
 				result = ctx.Err()
 				return
 			}
-			hctx := handler.New(lease.WithTerm(ctx, term), handler.Meta{ServerID: b.ServerID, PlayerID: b.PlayerID, SessionID: b.ID, GateID: b.GateAddr}).WithLoader(a.Load)
+			hctx := a.playerContext(lease.WithTerm(ctx, term), req)
 			result = fn(hctx)
 		})
 	})

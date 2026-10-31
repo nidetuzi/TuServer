@@ -30,11 +30,12 @@ func TestPlayerDailyLifecycle(t *testing.T) {
 	players := service.NewPlayerService(c, mem, event.New()).WithDayClock(loc, func() time.Time { return now })
 	r := router.New[int32]()
 	router.Register(r, demohandler.CmdLogin, demohandler.OnLogin(players))
-	app := logic.New(r, players.GetByID)
+	app := logic.New(r, nil)
+	app.KeyLoad = players.GetByKey
 	app.Scheduler, _ = scheduler.New(scheduler.Config{})
 	app.Hooks.Guard = c.Guard
-	app.Hooks.FlushID = func(ctx context.Context, serverID int32, collection string, id int64) error {
-		e, err := c.Get(ctx, serverID, collection, strconv.FormatInt(id, 10), nil)
+	app.Hooks.FlushKey = func(ctx context.Context, serverID int32, key string) error {
+		e, err := c.Get(ctx, serverID, "player", key, nil)
 		if err != nil {
 			return err
 		}
@@ -46,7 +47,7 @@ func TestPlayerDailyLifecycle(t *testing.T) {
 	}
 	BindPlayerLifecycle(app, players)
 	defer app.Stop()
-	body, _ := proto.Marshal(&game.LoginReq{Name: "daily"})
+	body, _ := proto.Marshal(&game.LoginReq{Username: "daily"})
 	login := func(session string) int64 {
 		t.Helper()
 		resp, err := app.Handle(ctx, logic.Request{GateID: "gate", SessionID: session, ServerID: 1, CmdID: demohandler.CmdLogin, Body: body})
@@ -71,7 +72,7 @@ func TestPlayerDailyLifecycle(t *testing.T) {
 	if entries := app.Scheduler.Entries(); len(entries) != 1 || entries[0].Spec != "@every 30s" {
 		t.Fatalf("在线检查未注册: %+v", entries)
 	}
-	hctx := handler.New(ctx, handler.Meta{ServerID: 1, PlayerID: id}).WithLoader(players.GetByID)
+	hctx := handler.New(ctx, handler.Meta{ServerID: 1, PlayerID: id, PlayerKey: get().CacheKey()}).WithKeyLoader(players.GetByKey)
 	if _, err := players.AddExp(hctx, 10); err != nil {
 		t.Fatal(err)
 	}

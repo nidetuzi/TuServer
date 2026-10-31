@@ -5,7 +5,8 @@ package game;
 option go_package = "tuserv/example/demo/gen/game";
 
 message LoginReq {
-  string name = 1;
+  // 渠道提供的用户名，不作为角色昵称展示。
+  string username = 1;
 }
 
 message LoginResp {

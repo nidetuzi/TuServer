@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -35,30 +36,25 @@ func NewPlayerService(c *cache.Cache, st store.Store, bus Publisher) *PlayerServ
 	return &PlayerService{cache: c, store: st, bus: bus, now: time.Now, location: time.FixedZone("Asia/Shanghai", 8*60*60)}
 }
 
-// Login 按区服和名字取得角色，没有则创建。未命中时由缓存内部读库，业务不调用 Load。
-// 新建会立刻插入并依赖 name、id 的唯一索引；并发创建撞索引时改为读取已经插入的那份。
-func (s *PlayerService) Login(ctx context.Context, serverID int32, name string) (*entity.Player, error) {
-	if name == "" || len(name) > 16 {
-		return nil, ErrBadName
+// Login 按区服和渠道用户名取得角色，昵称不参与身份查询。
+// 新建依赖 username、id 唯一索引，并发创建撞索引时读取已经插入的角色。
+func (s *PlayerService) Login(ctx context.Context, serverID int32, username string) (*entity.Player, error) {
+	if username == "" || len(username) > 256 {
+		return nil, ErrBadUsername
 	}
 	if err := s.ensure(ctx, serverID); err != nil {
 		return nil, err
 	}
-	alias := "name:" + name
-	if e, err := s.cache.Get(ctx, serverID, "player", alias, nil); err == nil {
-		return s.decorate(ctx, e.(*entity.Player)), nil
-	} else if !errors.Is(err, store.ErrNotFound) {
-		return nil, err
-	}
 	var found entity.Player
-	err := s.store.Find(ctx, serverID, "player", "name", name, &found)
+	err := s.store.Find(ctx, serverID, "player", "username", username, &found)
 	if err == nil {
-		return s.rememberPlayer(ctx, serverID, alias, &found)
+		return s.loginPlayer(ctx, serverID, found.CacheKey())
 	}
 	if !errors.Is(err, store.ErrNotFound) {
 		return nil, err
 	}
-	p := entity.NewPlayer(serverID, name)
+	p := entity.NewPlayer(serverID, "")
+	p.Username = username
 	id, err := s.store.NextID(ctx, serverID, "player")
 	if err != nil {
 		return nil, err
@@ -67,39 +63,45 @@ func (s *PlayerService) Login(ctx context.Context, serverID int32, name string) 
 	if err != nil {
 		return nil, err
 	}
+	// 渠道用户名可能包含内部账号信息，默认昵称使用角色编号。
+	p.Name = fmt.Sprintf("玩家%d", p.PlayerID)
 	p.InitRev(1)
 	_, doc := p.Persist()
 	if err := s.store.Insert(ctx, serverID, "player", p.CacheKey(), doc); err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
-			if ferr := s.store.Find(ctx, serverID, "player", "name", name, &found); ferr != nil {
+			if ferr := s.store.Find(ctx, serverID, "player", "username", username, &found); ferr != nil {
 				return nil, ferr
 			}
-			return s.rememberPlayer(ctx, serverID, alias, &found)
+			return s.loginPlayer(ctx, serverID, found.CacheKey())
 		}
 		return nil, err
 	}
 	kept := s.cache.Adopt(p).(*entity.Player)
-	s.cache.Alias(kept, alias)
-	s.cache.Alias(kept, idKey(kept.PlayerID))
 	return s.decorate(ctx, kept), nil
 }
 
-func (s *PlayerService) rememberPlayer(ctx context.Context, serverID int32, alias string, found *entity.Player) (*entity.Player, error) {
-	e, err := s.cache.Get(ctx, serverID, "player", found.CacheKey(), func() core.Entity { return &entity.Player{} })
+func (s *PlayerService) loginPlayer(ctx context.Context, serverID int32, key string) (*entity.Player, error) {
+	v, err := s.GetByKey(ctx, serverID, key)
 	if err != nil {
 		return nil, err
 	}
-	p := e.(*entity.Player)
-	s.cache.Alias(p, alias)
-	s.cache.Alias(p, idKey(p.PlayerID))
-	return s.decorate(ctx, p), nil
+	return v.(*entity.Player), nil
+}
+
+// GetByKey 按登录解析出的 ObjectID 访问缓存，未命中由框架加载存档。
+func (s *PlayerService) GetByKey(ctx context.Context, serverID int32, key string) (any, error) {
+	e, err := s.cache.Get(ctx, serverID, "player", key, func() core.Entity { return &entity.Player{} })
+	if err != nil {
+		return nil, err
+	}
+	return s.decorate(ctx, e.(*entity.Player)), nil
 }
 
 func (s *PlayerService) ensure(ctx context.Context, serverID int32) error {
 	if _, ok := s.ready.Load(serverID); ok {
 		return nil
 	}
-	if err := s.store.EnsureUnique(ctx, serverID, "player", "name"); err != nil {
+	if err := s.store.EnsureUnique(ctx, serverID, "player", "username"); err != nil {
 		return err
 	}
 	if err := s.store.EnsureUnique(ctx, serverID, "player", "id"); err != nil {
@@ -116,13 +118,13 @@ func (s *PlayerService) decorate(ctx context.Context, p *entity.Player) *entity.
 	return p
 }
 
-// GetByID 按自增编号读取角色。缓存别名没有时再按 id 字段查库，不能把这个号当成 _id。
+// GetByID 仅供按业务编号查询角色的业务入口使用，不创建缓存别名。
 func (s *PlayerService) GetByID(ctx context.Context, serverID int32, playerID int64) (any, error) {
-	p, err := remember(ctx, s.cache, s.store, serverID, "player", playerID, func() core.Entity { return &entity.Player{} })
-	if err != nil {
+	var found entity.Player
+	if err := s.store.Find(ctx, serverID, "player", "id", playerID, &found); err != nil {
 		return nil, err
 	}
-	return s.decorate(ctx, p.(*entity.Player)), nil
+	return s.GetByKey(ctx, serverID, found.CacheKey())
 }
 
 // AddExp 增加经验。每次升级都发事件，奖励由监听者修改背包。
