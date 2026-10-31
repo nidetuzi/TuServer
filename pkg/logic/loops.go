@@ -15,7 +15,7 @@ type Loops struct {
 	FlushEvery time.Duration
 	// ProbeEvery 是对照注册中心网关列表的间隔。
 	ProbeEvery time.Duration
-	// Renew 只续本节点仍持有的租约。
+	// Renew 只续本节点仍持有的租约，每轮的截止时间为 RenewEvery，存储调用必须遵守 ctx。
 	Renew func(context.Context)
 	// Flush 刷盘并淘汰。这两步仍放在一起，因为它们都只动缓存，不负责续租。
 	Flush func(context.Context)
@@ -33,7 +33,18 @@ func (l Loops) Run(stop <-chan struct{}) {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		l.loop(stop, l.RenewEvery, l.Renew)
+		l.loop(stop, l.RenewEvery, func(ctx context.Context) {
+			if l.Renew == nil {
+				return
+			}
+			every := l.RenewEvery
+			if every <= 0 {
+				every = time.Second
+			}
+			ctx, cancel := context.WithTimeout(ctx, every)
+			defer cancel()
+			l.Renew(ctx)
+		})
 	}()
 	go func() {
 		defer wg.Done()

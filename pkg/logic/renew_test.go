@@ -43,6 +43,7 @@ func TestRenewLeasesExtendsOwnLease(t *testing.T) {
 
 	now = now.Add(time.Second)
 	app.RenewLeases(ctx)
+	waitAbandons(t, app)
 
 	if asks.Load() != 0 {
 		t.Fatalf("续自己的租约不应 AskRelease，次数=%d", asks.Load())
@@ -414,6 +415,7 @@ func TestRenewLeasesDropsLocalWhenHeldElsewhere(t *testing.T) {
 		t.Fatalf("过期后应由 B 接手: %+v %v", got, err)
 	}
 	app.RenewLeases(ctx)
+	waitAbandons(t, app)
 
 	if asks.Load() != 0 {
 		t.Fatalf("续约失败不能 AskRelease，次数=%d", asks.Load())

@@ -8,6 +8,8 @@ tcp_addr: :8001
 ws_addr: :8002
 # 客户端多久没有入站字节就断开。0s 关闭，留空按 60s。心跳帧会把这个计时往后推。
 idle_timeout: 60s
+# Gate 到 Logic 的单次 Pick/Dispatch/Disconnect 超时。
+gate_timeout: 5s
 etcd:
   endpoints:
     - 127.0.0.1:2379

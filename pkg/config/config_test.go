@@ -58,6 +58,20 @@ func TestRenewEveryAndReapParallel(t *testing.T) {
 	}
 }
 
+func TestGateRPCTimeout(t *testing.T) {
+	if (File{}).GateRPC() != 5*time.Second {
+		t.Fatal("Gate RPC 缺省超时应为 5 秒")
+	}
+	for _, v := range []string{"0s", "-1s", "bad"} {
+		if (File{GateTimeout: v}).GateRPC() != 5*time.Second {
+			t.Fatalf("非法 Gate RPC 超时应回退默认值: %q", v)
+		}
+	}
+	if (File{GateTimeout: "250ms"}).GateRPC() != 250*time.Millisecond {
+		t.Fatal("合法 Gate RPC 超时未生效")
+	}
+}
+
 func TestClientIdleAndGateProbe(t *testing.T) {
 	var empty File
 	if empty.ClientIdle() != 60*time.Second || empty.GateProbeEvery() != 5*time.Second || empty.GateMissLimit() != 2 {

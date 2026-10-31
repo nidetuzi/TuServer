@@ -32,7 +32,9 @@ type File struct {
 	FlushInterval string `yaml:"flush_interval"`
 	// RenewInterval 是在线角色续租间隔，应小于租约 TTL，并且不跟刷盘共用一个循环。
 	RenewInterval string `yaml:"renew_interval"`
-	IdleTimeout   string `yaml:"idle_timeout"`
+	IdleTimeout string `yaml:"idle_timeout"`
+	// GateTimeout 是 Gate 到 Logic 的单次 RPC 超时时间。
+	GateTimeout string `yaml:"gate_timeout"`
 	// GateProbeInterval 是对照注册中心网关列表的间隔。
 	GateProbeInterval string `yaml:"gate_probe_interval"`
 	GateMisses        int    `yaml:"gate_misses"`
@@ -152,6 +154,18 @@ func (f File) ClientIdle() time.Duration {
 	}
 	if d <= 0 {
 		return 0
+	}
+	return d
+}
+
+// GateRPC是网关调用逻辑节点的单次超时。留空、非法或非正数按 5 秒，避免 RPC 卡住时无法发送断线通知。
+func (f File) GateRPC() time.Duration {
+	if f.GateTimeout == "" {
+		return 5 * time.Second
+	}
+	d, err := time.ParseDuration(f.GateTimeout)
+	if err != nil || d <= 0 {
+		return 5 * time.Second
 	}
 	return d
 }

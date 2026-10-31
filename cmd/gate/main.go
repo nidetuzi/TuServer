@@ -45,7 +45,7 @@ func main() {
 		log.Error("etcd dial", "err", err)
 		os.Exit(1)
 	}
-	g := gate.New(cfg.AdvertiseAddr, nodes, protocol.FrameCodec{})
+	g := gate.NewWithTimeout(cfg.AdvertiseAddr, nodes, protocol.FrameCodec{}, cfg.GateRPC())
 	reg, err := cluster.NewRegistry(cfg.Etcd.Endpoints)
 	if err != nil {
 		log.Error("etcd registry", "err", err)

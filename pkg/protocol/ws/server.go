@@ -195,6 +195,12 @@ func (p *wsPeer) shutdown(err error) {
 
 func (p *wsPeer) loop(h protocol.Handler) {
 	for pkt := range p.q {
+		p.mu.Lock()
+		closed := p.closed
+		p.mu.Unlock()
+		if closed {
+			continue
+		}
 		if h != nil {
 			h.OnPacket(p, pkt)
 		}
@@ -206,6 +212,6 @@ func (p *wsPeer) loop(h protocol.Handler) {
 	p.mu.Lock()
 	err := p.closeErr
 	p.mu.Unlock()
-	// 和 OnPacket 同一条协程、且排在所有已入队帧之后，断线通知里的 playerID 才是最新的，也只会发一次。
+	// 和 OnPacket 同一条协程，排在当前处理帧之后且不会处理关闭后的排队帧，断线通知里的 playerID 才是最新的，也只会发一次。
 	h.OnClose(p, err)
 }

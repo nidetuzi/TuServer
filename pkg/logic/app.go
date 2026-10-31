@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"tuserv/pkg/actor"
@@ -107,6 +108,11 @@ type App struct {
 	gateMiss map[string]int
 	// Owners 在实体自己的邮箱中处理内部调用，不能先进入会话邮箱再等待自己。
 	Owners *owner.Runtime
+
+	abandonMu      sync.Mutex
+	abandonPending map[string]*abandonTask
+	abandonActive  int
+	renewErrors    atomic.Uint64
 }
 
 // New 创建逻辑节点运行时。
@@ -281,7 +287,8 @@ func (a *App) RenewLeases(ctx context.Context) {
 	}
 	misses, err := lease.RenewOwn(ctx, a.Hooks.Leases, items)
 	if err != nil {
-		log.Error("renew leases", "err", err, "n", len(items))
+		a.renewErrors.Add(uint64(len(items)))
+		log.Warn("renew leases", "err", err, "n", len(items), "renew_errors", a.renewErrors.Load())
 		return
 	}
 	missed := make(map[string]store.LeaseMiss, len(misses))
@@ -293,9 +300,12 @@ func (a *App) RenewLeases(ctx context.Context) {
 		if m, ok := missed[key]; ok {
 			if errors.Is(m.Err, lease.ErrHeld) {
 				// 已经被别人持有、已经释放，或库里没有。放弃本地会话，不要再 Claim，更不能 AskRelease。
-				a.abandonLost(ctx, b, m.Err)
+				a.queueAbandon(b, m.Err)
+			} else {
+				a.renewErrors.Add(1)
+				log.Warn("renew lease failed", "err", m.Err, "server_id", b.ServerID, "player_id", b.PlayerID, "term", b.Term, "renew_errors", a.renewErrors.Load())
 			}
-			// 任期仍属于本节点但已经对不上时什么都不做，避免把还在线的会话踢掉。
+			// 任期不符或存储失败不能证明已被接走，保留绑定等待下一轮确认。
 			continue
 		}
 		a.releaseIfUnbound(ctx, b)

@@ -2,7 +2,9 @@ package gate
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"time"
 
 	"tuserv/pkg/cluster"
 	"tuserv/pkg/log"
@@ -18,9 +20,10 @@ type Forwarder interface {
 
 // Gate 持有会话表，并实现客户端连接回调。
 type Gate struct {
-	id   string
-	fwd  Forwarder
-	code protocol.Codec
+	id      string
+	fwd     Forwarder
+	code    protocol.Codec
+	timeout time.Duration
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -38,10 +41,18 @@ type session struct {
 
 // New 创建网关。id 是逻辑节点回推时使用的 Gate 地址。
 func New(id string, fwd Forwarder, codec protocol.Codec) *Gate {
+	return NewWithTimeout(id, fwd, codec, 5*time.Second)
+}
+
+// NewWithTimeout 创建网关，并限制节点间调用的最长等待时间。
+func NewWithTimeout(id string, fwd Forwarder, codec protocol.Codec, timeout time.Duration) *Gate {
 	if codec == nil {
 		codec = protocol.FrameCodec{}
 	}
-	return &Gate{id: id, fwd: fwd, code: codec, sessions: make(map[string]*session)}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return &Gate{id: id, fwd: fwd, code: codec, timeout: timeout, sessions: make(map[string]*session)}
 }
 
 // OnOpen 记录连接。此时还没有逻辑节点，要等第一帧才知道区服。
@@ -88,7 +99,9 @@ func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 	}
 	s.serverID = pkt.ServerID
 	if s.logicAddr == "" {
-		inst, err := g.fwd.Pick(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
+		inst, err := g.fwd.Pick(ctx)
+		cancel()
 		if err != nil {
 			log.Error("pick logic", "err", err, "session_id", p.ID())
 			return
@@ -96,7 +109,8 @@ func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 		s.logicAddr = inst.Addr
 		log.Info("session bind", "server_id", pkt.ServerID, "logic", inst.Addr, "session_id", p.ID())
 	}
-	resp, err := g.fwd.Dispatch(context.Background(), s.logicAddr, logic.Request{
+	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
+	resp, err := g.fwd.Dispatch(ctx, s.logicAddr, logic.Request{
 		GateID:    g.id,
 		SessionID: p.ID(),
 		ServerID:  pkt.ServerID,
@@ -104,11 +118,15 @@ func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 		CmdID:     pkt.CmdID,
 		Body:      pkt.Body,
 	})
+	timedOut := errors.Is(ctx.Err(), context.DeadlineExceeded)
+	cancel()
 	// 业务错误已经编码进回包，这里的 err 只剩选路和传输失败。
-	// 清掉地址是为了下一帧重选节点；玩法失败不能走这里，否则客户端既看不到错误码，也会丢掉还活着的 Logic。
+	// 清掉地址是为了下一帧重选节点；超时仍保留目的地，断线通知必须回到原 Logic 收尾。
 	if err != nil {
 		log.Warn("dispatch", "err", err, "session_id", p.ID(), "logic", s.logicAddr)
-		s.logicAddr = ""
+		if !timedOut {
+			s.logicAddr = ""
+		}
 		return
 	}
 	if resp.PlayerID != 0 {
@@ -120,13 +138,15 @@ func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 }
 
 // OnClose 通知逻辑节点丢掉这条会话，避免区服广播继续推给已断开的连接。
-// 传输层会等这条连接上的 OnPacket 都返回后再调用，因此这里的 playerID 和 logicAddr 已经是最后一次回包写回的值。
+// 传输层会等当前 OnPacket 返回后再调用，因此这里的 playerID 和 logicAddr 已经是最后一次回包写回的值。
 func (g *Gate) OnClose(p protocol.Peer, _ error) {
 	s := g.drop(p.ID())
 	if s == nil || s.logicAddr == "" {
 		return
 	}
-	_, _ = g.fwd.Dispatch(context.Background(), s.logicAddr, logic.Request{
+	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
+	defer cancel()
+	_, _ = g.fwd.Dispatch(ctx, s.logicAddr, logic.Request{
 		GateID:    g.id,
 		SessionID: p.ID(),
 		ServerID:  s.serverID,

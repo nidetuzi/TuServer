@@ -244,6 +244,7 @@ func TestRenewMissDoesNotAskRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.RenewLeases(context.Background())
+	waitAbandons(t, app)
 	if asked.Load() != 0 {
 		t.Fatalf("续租失败不应要求对方交出租约: %d", asked.Load())
 	}

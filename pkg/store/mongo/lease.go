@@ -119,7 +119,26 @@ func (s *Store) renewServer(ctx context.Context, serverID int32, batch []store.L
 	coll := s.coll(serverID, "lease")
 	res, err := coll.BulkWrite(ctx, models, options.BulkWrite().SetOrdered(false))
 	if err != nil {
-		return nil, err
+		failed, pending, ok := classifyBulkWriteError(err, res, send)
+		if !ok {
+			return nil, err
+		}
+		for _, item := range failed {
+			misses = append(misses, store.LeaseMiss{ServerID: item.item.ServerID, Key: item.item.Key, Err: item.err})
+		}
+		if len(pending) == 0 {
+			return misses, nil
+		}
+		pendingIDs := make([]string, len(pending))
+		for i, it := range pending {
+			pendingIDs[i] = it.Key
+		}
+		got, qerr := loadRenewed(ctx, coll, pendingIDs)
+		if qerr != nil {
+			return nil, err
+		}
+		misses = append(misses, renewMisses(pending, got)...)
+		return misses, nil
 	}
 	if res != nil && res.MatchedCount == int64(len(send)) {
 		return misses, nil
@@ -131,6 +150,38 @@ func (s *Store) renewServer(ctx context.Context, serverID int32, batch []store.L
 	}
 	misses = append(misses, renewMisses(send, got)...)
 	return misses, nil
+}
+
+type bulkWriteFailure struct {
+	item store.LeaseTouch
+	err  error
+}
+
+// classifyBulkWriteError 保留明确写失败，并只对没有明确结果的条目做状态核验。
+func classifyBulkWriteError(err error, res *drv.BulkWriteResult, items []store.LeaseTouch) ([]bulkWriteFailure, []store.LeaseTouch, bool) {
+	var bwe drv.BulkWriteException
+	if !errors.As(err, &bwe) || res == nil || bwe.WriteConcernError != nil || len(bwe.WriteErrors) == 0 {
+		return nil, nil, false
+	}
+	failed := make([]bulkWriteFailure, 0, len(bwe.WriteErrors))
+	seen := make(map[int]struct{}, len(bwe.WriteErrors))
+	for _, bulkErr := range bwe.WriteErrors {
+		if bulkErr.Index < 0 || bulkErr.Index >= len(items) {
+			return nil, nil, false
+		}
+		if _, ok := seen[bulkErr.Index]; ok {
+			continue
+		}
+		seen[bulkErr.Index] = struct{}{}
+		failed = append(failed, bulkWriteFailure{item: items[bulkErr.Index], err: bulkErr})
+	}
+	pending := make([]store.LeaseTouch, 0, len(items)-len(failed))
+	for i, item := range items {
+		if _, ok := seen[i]; !ok {
+			pending = append(pending, item)
+		}
+	}
+	return failed, pending, true
 }
 
 // leaseRenewSpec 是单条续期的过滤和更新。过滤必须带上持有者和任期，更新不能改这两项。

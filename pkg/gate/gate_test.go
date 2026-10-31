@@ -3,7 +3,9 @@ package gate
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"tuserv/pkg/cluster"
 	"tuserv/pkg/errcode"
@@ -75,6 +77,79 @@ func (f *scriptFwd) Dispatch(context.Context, string, logic.Request) (logic.Resp
 func (f *scriptFwd) Pick(context.Context) (cluster.Instance, error) {
 	f.picks++
 	return cluster.Instance{Addr: "10.0.0.8:1", Weight: 1}, nil
+}
+
+type timeoutFwd struct {
+	pickCanceled       chan struct{}
+	dispatchCanceled   chan struct{}
+	disconnectCanceled chan struct{}
+	once               sync.Once
+	hosts              []string
+}
+
+func (f *timeoutFwd) Pick(ctx context.Context) (cluster.Instance, error) {
+	<-ctx.Done()
+	close(f.pickCanceled)
+	return cluster.Instance{}, ctx.Err()
+}
+
+func (f *timeoutFwd) Dispatch(ctx context.Context, host string, req logic.Request) (logic.Response, error) {
+	f.hosts = append(f.hosts, host)
+	<-ctx.Done()
+	if req.CmdID == logic.CmdDisconnect {
+		f.once.Do(func() { close(f.disconnectCanceled) })
+	} else {
+		close(f.dispatchCanceled)
+	}
+	return logic.Response{}, ctx.Err()
+}
+
+func newTimeoutFwd() *timeoutFwd {
+	return &timeoutFwd{
+		pickCanceled: make(chan struct{}), dispatchCanceled: make(chan struct{}), disconnectCanceled: make(chan struct{}),
+	}
+}
+
+func TestPickTimeoutHonorsContext(t *testing.T) {
+	fwd := newTimeoutFwd()
+	g := NewWithTimeout("gate", fwd, nil, 10*time.Millisecond)
+	p := &fakePeer{id: "pick-timeout"}
+	g.OnOpen(p)
+	g.OnPacket(p, protocol.Packet{CmdID: 1001, ServerID: 3})
+	select {
+	case <-fwd.pickCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("Pick 未收到超时取消")
+	}
+	if s := g.session(p.ID()); s.logicAddr != "" {
+		t.Fatalf("Pick 超时不应绑定 Logic: %q", s.logicAddr)
+	}
+}
+
+func TestDispatchTimeoutKeepsDisconnectDestination(t *testing.T) {
+	fwd := newTimeoutFwd()
+	g := NewWithTimeout("gate", fwd, nil, 10*time.Millisecond)
+	p := &fakePeer{id: "dispatch-timeout"}
+	g.OnOpen(p)
+	g.session(p.ID()).logicAddr = "10.0.0.8:1"
+	g.OnPacket(p, protocol.Packet{CmdID: 1001, ServerID: 3})
+	select {
+	case <-fwd.dispatchCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("Dispatch 未收到超时取消")
+	}
+	if s := g.session(p.ID()); s == nil || s.logicAddr != "10.0.0.8:1" {
+		t.Fatalf("Dispatch 超时后必须保留逻辑节点地址: %+v", g.session(p.ID()))
+	}
+	g.OnClose(p, context.DeadlineExceeded)
+	select {
+	case <-fwd.disconnectCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("Disconnect 未收到超时取消")
+	}
+	if len(fwd.hosts) != 2 || fwd.hosts[0] != "10.0.0.8:1" || fwd.hosts[1] != "10.0.0.8:1" {
+		t.Fatalf("超时和断线通知必须使用同一 Logic: %v", fwd.hosts)
+	}
 }
 
 func TestBusinessErrorKeepsLogicBinding(t *testing.T) {

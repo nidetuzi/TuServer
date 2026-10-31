@@ -1,9 +1,11 @@
 package mongo
 
 import (
+	"errors"
 	"testing"
 
 	"go.mongodb.org/mongo-driver/bson"
+	drv "go.mongodb.org/mongo-driver/mongo"
 
 	"tuserv/pkg/store"
 )
@@ -41,6 +43,55 @@ func TestLeaseRenewSpecKeepsOwnerAndTerm(t *testing.T) {
 	}
 	if doc.Lookup("owner").Type != 0 || doc.Lookup("term").Type != 0 {
 		t.Fatal("续期不能改持有者或任期")
+	}
+}
+
+func TestClassifyBulkWriteErrorPreservesIndexedWriteErrors(t *testing.T) {
+	items := []store.LeaseTouch{{Key: "first"}, {Key: "second"}, {Key: "third"}}
+	writeErr := drv.BulkWriteError{WriteError: drv.WriteError{Index: 1, Code: 11000, Message: "duplicate"}}
+	err := drv.BulkWriteException{WriteErrors: []drv.BulkWriteError{writeErr}}
+	failed, pending, ok := classifyBulkWriteError(err, &drv.BulkWriteResult{MatchedCount: 1}, items)
+	if !ok || len(failed) != 1 || failed[0].item.Key != "second" || len(pending) != 2 {
+		t.Fatalf("应保留写失败并待核验其余条目: ok=%v failed=%+v pending=%+v", ok, failed, pending)
+	}
+	if failed[0].err.Error() != writeErr.Error() {
+		t.Fatalf("应返回原始 WriteError: got=%v want=%v", failed[0].err, writeErr)
+	}
+}
+
+func TestClassifyBulkWriteErrorLeavesUnmatchedItemsForLookup(t *testing.T) {
+	items := []store.LeaseTouch{{Key: "first"}, {Key: "second"}, {Key: "third"}}
+	err := drv.BulkWriteException{
+		WriteErrors: []drv.BulkWriteError{{WriteError: drv.WriteError{Index: 2, Message: "write failed"}}},
+	}
+	failed, pending, ok := classifyBulkWriteError(err, &drv.BulkWriteResult{MatchedCount: 1}, items)
+	if !ok || len(failed) != 1 || len(pending) != 2 || pending[0].Key != "first" || pending[1].Key != "second" {
+		t.Fatalf("未报写错误的条目必须待查询: ok=%v failed=%+v pending=%+v", ok, failed, pending)
+	}
+}
+
+func TestBulkWriteFailedItemsRejectsUncertainResults(t *testing.T) {
+	items := []store.LeaseTouch{{Key: "first"}, {Key: "second"}}
+	cases := []struct {
+		name string
+		err  error
+		res  *drv.BulkWriteResult
+	}{
+		{name: "network", err: errors.New("network"), res: &drv.BulkWriteResult{MatchedCount: 1}},
+		{name: "nil result", err: drv.BulkWriteException{WriteErrors: []drv.BulkWriteError{{WriteError: drv.WriteError{Index: 1}}}}},
+		{name: "write concern", err: drv.BulkWriteException{
+			WriteConcernError: &drv.WriteConcernError{Message: "timeout"},
+			WriteErrors:       []drv.BulkWriteError{{WriteError: drv.WriteError{Index: 1}}},
+		}, res: &drv.BulkWriteResult{MatchedCount: 1}},
+		{name: "invalid index", err: drv.BulkWriteException{WriteErrors: []drv.BulkWriteError{{WriteError: drv.WriteError{Index: 2}}}}, res: &drv.BulkWriteResult{MatchedCount: 1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			failed, pending, ok := classifyBulkWriteError(tc.err, tc.res, items)
+			if ok || failed != nil || pending != nil {
+				t.Fatalf("不确定结果不能分类: ok=%v failed=%+v pending=%+v", ok, failed, pending)
+			}
+		})
 	}
 }
 
