@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"tuserv/pkg/actor"
+	"tuserv/pkg/entity"
 	"tuserv/pkg/errcode"
 	"tuserv/pkg/handler"
 	"tuserv/pkg/lease"
@@ -33,6 +34,10 @@ type Request struct {
 // ErrClientCmd 表示客户端请求使用了非正协议号。
 // 它走统一错误帧而不是 RPC 错误，网关才不会把还活着的 Logic 拆掉。0 和负数只留给带 Internal 的内部调用。
 var ErrClientCmd = errcode.New(errcode.BadArg, "logic.client_cmd")
+
+// ErrServerMismatch 表示已登录请求的区服和角色编号不是同一个服。
+// 复用 BadArg，因为帧头区服就是这次请求的参数，客户端按已有的参数错误处理即可。
+var ErrServerMismatch = errcode.New(errcode.BadArg, "logic.server_mismatch")
 
 // ErrInternalCmd 表示内部调用带了未知协议号。
 var ErrInternalCmd = errors.New("logic: unknown internal cmd")
@@ -112,13 +117,18 @@ func New(r *router.Router[int32], load handler.Loader) *App {
 
 // Handle 在该角色的 actor 里执行协议。已登录的请求按角色编号串行，而不是按连接。
 // 客户端只能走正数协议号。断线、主人调用和租约交接必须带 Internal，避免把协议号本身当成凭证。
-// 玩法失败和非法协议号都会编成统一错误包，并返回 nil error。非 nil 只表示这次请求没有在本节点正常结束，网关应重选。
+// 玩法失败、非法协议号，以及已登录请求的区服和角色编号对不上，都会编成统一错误包，并返回 nil error。
+// 非 nil 只表示这次请求没有在本节点正常结束，网关应重选。
 func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 	if req.Internal {
 		return a.handleInternal(ctx, req)
 	}
 	if req.CmdID <= 0 {
 		return clientError(req, ErrClientCmd), nil
+	}
+	// 编号高位是区服。对不上就在进 actor 之前回错误帧，否则会按新服申领租约并把会话改挂过去。
+	if req.PlayerID > 0 && req.PlayerID/entity.IDSpan != int64(req.ServerID) {
+		return clientError(req, ErrServerMismatch), nil
 	}
 	var (
 		resp  Response

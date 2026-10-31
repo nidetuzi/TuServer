@@ -7,6 +7,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
+	"tuserv/pkg/entity"
 	"tuserv/pkg/errcode"
 	"tuserv/pkg/handler"
 	"tuserv/pkg/owner"
@@ -19,12 +20,16 @@ func TestBusinessErrorBecomesFrame(t *testing.T) {
 	r := router.New[int32]()
 	app := New(r, nil)
 	defer app.Stop()
+	playerID, err := entity.WithServer(1, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
 	r.Handle(1, func(ctx *handler.Context, _ []byte) ([]byte, error) {
-		ctx.BindPlayer(7)
+		ctx.BindPlayer(playerID)
 		return []byte("ok"), nil
 	})
 	resp, err := app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, CmdID: 1, GateID: "g"})
-	if err != nil || resp.PlayerID != 7 || string(resp.Body) != "ok" {
+	if err != nil || resp.PlayerID != playerID || string(resp.Body) != "ok" {
 		t.Fatalf("登录应仍是成功包: %+v %v", resp, err)
 	}
 	if len(app.Sessions(1)) != 1 {
@@ -34,7 +39,7 @@ func TestBusinessErrorBecomesFrame(t *testing.T) {
 	r.Handle(2, func(*handler.Context, []byte) ([]byte, error) {
 		return nil, errcode.New(errcode.NotEnough, "service: not enough items")
 	})
-	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: 7, CmdID: 2, GateID: "g"})
+	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 2, GateID: "g"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +66,7 @@ func TestBusinessErrorBecomesFrame(t *testing.T) {
 	router.Register(r, int32(3), func(*handler.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
 		return &wrapperspb.StringValue{Value: "x"}, nil
 	})
-	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: 7, CmdID: 3, Body: []byte{0xff}, GateID: "g"})
+	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 3, Body: []byte{0xff}, GateID: "g"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +89,7 @@ func TestBusinessErrorBecomesFrame(t *testing.T) {
 	r.Handle(5, func(*handler.Context, []byte) ([]byte, error) {
 		return nil, owner.NewError("guild.not_found", "missing guild 123")
 	})
-	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: 7, CmdID: 5, GateID: "g"})
+	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 5, GateID: "g"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +100,7 @@ func TestBusinessErrorBecomesFrame(t *testing.T) {
 	r.Handle(6, func(*handler.Context, []byte) ([]byte, error) {
 		return nil, owner.NewError("guild.full", "full")
 	})
-	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: 7, CmdID: 6, GateID: "g"})
+	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 6, GateID: "g"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +111,7 @@ func TestBusinessErrorBecomesFrame(t *testing.T) {
 	r.Handle(7, func(*handler.Context, []byte) ([]byte, error) {
 		return nil, owner.NewError("owner.panic", "boom")
 	})
-	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: 7, CmdID: 7, GateID: "g"})
+	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 7, GateID: "g"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +122,7 @@ func TestBusinessErrorBecomesFrame(t *testing.T) {
 	r.Handle(8, func(*handler.Context, []byte) ([]byte, error) {
 		return nil, errors.New("mongo timeout secret-host")
 	})
-	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: 7, CmdID: 8, GateID: "g"})
+	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 8, GateID: "g"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +165,11 @@ func TestNodeFailureStaysRPCError(t *testing.T) {
 	})
 	app.Hooks.Self = "logic-a"
 	app.Hooks.Leases = failLock{}
-	resp, err := app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: 9, CmdID: 1, GateID: "g"})
+	playerID, idErr := entity.WithServer(1, 9)
+	if idErr != nil {
+		t.Fatal(idErr)
+	}
+	resp, err := app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 1, GateID: "g"})
 	if err == nil || resp.CmdID == protocol.CmdError {
 		t.Fatalf("租约故障应作为节点错误返回: %+v %v", resp, err)
 	}

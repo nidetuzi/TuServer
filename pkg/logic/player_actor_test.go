@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"tuserv/pkg/entity"
 	"tuserv/pkg/handler"
 	"tuserv/pkg/router"
 )
@@ -22,8 +23,12 @@ func TestPlayerActorSerializesAndKicksOldSession(t *testing.T) {
 		kicks = append(kicks, sessionID)
 		mu.Unlock()
 	}
+	playerID, err := entity.WithServer(1, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
 	r.Handle(1, func(ctx *handler.Context, _ []byte) ([]byte, error) {
-		ctx.BindPlayer(42)
+		ctx.BindPlayer(playerID)
 		return []byte("ok"), nil
 	})
 	if _, err := app.Handle(context.Background(), Request{SessionID: "a", ServerID: 1, CmdID: 1, GateID: "g"}); err != nil {
@@ -43,7 +48,7 @@ func TestPlayerActorSerializesAndKicksOldSession(t *testing.T) {
 		ran.Store(true)
 		return []byte("no"), nil
 	})
-	if _, err := app.Handle(context.Background(), Request{SessionID: "a", ServerID: 1, PlayerID: 42, CmdID: 2, GateID: "g"}); err != nil {
+	if _, err := app.Handle(context.Background(), Request{SessionID: "a", ServerID: 1, PlayerID: playerID, CmdID: 2, GateID: "g"}); err != nil {
 		t.Fatal(err)
 	}
 	if ran.Load() {
@@ -64,7 +69,7 @@ func TestPlayerActorSerializesAndKicksOldSession(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = app.Handle(context.Background(), Request{SessionID: "b", ServerID: 1, PlayerID: 42, CmdID: 3, GateID: "g"})
+			_, _ = app.Handle(context.Background(), Request{SessionID: "b", ServerID: 1, PlayerID: playerID, CmdID: 3, GateID: "g"})
 		}()
 	}
 	wg.Wait()

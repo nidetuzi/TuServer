@@ -71,6 +71,21 @@ func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 		_ = p.Close()
 		return
 	}
+	// 角色绑定后区服以当时那一帧为准。再改只回错误帧：断开会把人踢下线，转发则会按新服申领租约。
+	if s.playerID != 0 && pkt.ServerID != s.serverID {
+		if err := p.WritePacket(protocol.Packet{
+			CmdID:    protocol.CmdError,
+			ServerID: s.serverID,
+			Body: protocol.MarshalError(protocol.ErrorBody{
+				Code:   logic.ErrServerMismatch.Errno(),
+				ReqCmd: pkt.CmdID,
+				Detail: logic.ErrServerMismatch.Error(),
+			}),
+		}); err != nil {
+			log.Warn("write client", "err", err, "session_id", p.ID())
+		}
+		return
+	}
 	s.serverID = pkt.ServerID
 	if s.logicAddr == "" {
 		inst, err := g.fwd.Pick(context.Background())

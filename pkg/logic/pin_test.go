@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"tuserv/pkg/entity"
 	"tuserv/pkg/handler"
 	"tuserv/pkg/router"
 )
@@ -18,12 +19,16 @@ func TestPinPlayerOnceUntilDisconnect(t *testing.T) {
 		n.Add(1)
 		return func() { n.Add(-1) }
 	}
+	playerID, err := entity.WithServer(1, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
 	r.Handle(1, func(ctx *handler.Context, _ []byte) ([]byte, error) {
-		ctx.BindPlayer(7)
+		ctx.BindPlayer(playerID)
 		return []byte("ok"), nil
 	})
 	ctx := context.Background()
-	req := Request{SessionID: "s", ServerID: 1, PlayerID: 7, CmdID: 1, GateID: "g"}
+	req := Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 1, GateID: "g"}
 	for i := 0; i < 3; i++ {
 		if _, err := app.Handle(ctx, req); err != nil {
 			t.Fatal(err)

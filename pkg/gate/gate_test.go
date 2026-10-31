@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"tuserv/pkg/cluster"
+	"tuserv/pkg/errcode"
 	"tuserv/pkg/logic"
 	"tuserv/pkg/protocol"
 )
@@ -163,6 +164,71 @@ func (f *recordFwd) Pick(context.Context) (cluster.Instance, error) {
 func (f *recordFwd) Dispatch(_ context.Context, _ string, req logic.Request) (logic.Response, error) {
 	f.reqs = append(f.reqs, req)
 	return logic.Response{CmdID: req.CmdID}, nil
+}
+
+type bindFwd struct {
+	reqs []logic.Request
+}
+
+func (f *bindFwd) Pick(context.Context) (cluster.Instance, error) {
+	return cluster.Instance{Addr: "127.0.0.1:9101", Weight: 1}, nil
+}
+
+func (f *bindFwd) Dispatch(_ context.Context, _ string, req logic.Request) (logic.Response, error) {
+	f.reqs = append(f.reqs, req)
+	if req.CmdID == 1001 {
+		return logic.Response{PlayerID: 300001, CmdID: req.CmdID, Body: []byte("in")}, nil
+	}
+	return logic.Response{CmdID: req.CmdID, Body: []byte("ok")}, nil
+}
+
+// TestServerLockedAfterLogin 保证绑定角色后改区服只回错误帧，不转发给逻辑节点。
+func TestServerLockedAfterLogin(t *testing.T) {
+	fwd := &bindFwd{}
+	g := New("127.0.0.1:9001", fwd, nil)
+	p := &fakePeer{id: "s"}
+	g.OnOpen(p)
+
+	g.OnPacket(p, protocol.Packet{CmdID: 1002, ServerID: 1, Body: []byte("a")})
+	g.OnPacket(p, protocol.Packet{CmdID: 1002, ServerID: 3, Body: []byte("b")})
+	if len(fwd.reqs) != 2 || fwd.reqs[1].ServerID != 3 {
+		t.Fatalf("登录前仍应接受换区服: %+v", fwd.reqs)
+	}
+
+	g.OnPacket(p, protocol.Packet{CmdID: 1001, ServerID: 3, Body: []byte("login")})
+	if len(fwd.reqs) != 3 || fwd.reqs[2].PlayerID != 0 {
+		t.Fatalf("登录帧应转发且此时还没有角色: %+v", fwd.reqs)
+	}
+
+	before := len(fwd.reqs)
+	g.OnPacket(p, protocol.Packet{CmdID: 1002, ServerID: 9, Body: []byte("no")})
+	if len(fwd.reqs) != before {
+		t.Fatalf("区服不一致不应再转发: %+v", fwd.reqs[before:])
+	}
+	if p.closed {
+		t.Fatal("区服不一致应回错误帧而不是断开")
+	}
+	fault, err := protocol.UnmarshalError(p.last.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.last.CmdID != protocol.CmdError || p.last.ServerID != 3 || fault.Code != errcode.BadArg || fault.ReqCmd != 1002 || fault.Detail != logic.ErrServerMismatch.Error() {
+		t.Fatalf("错误帧应留在原区服: pkt=%+v fault=%+v", p.last, fault)
+	}
+	if s := g.session("s"); s.serverID != 3 || s.playerID != 300001 || s.logicAddr == "" {
+		t.Fatalf("错误帧不应改绑定: %+v", s)
+	}
+
+	g.OnPacket(p, protocol.Packet{CmdID: 1004, ServerID: 3, Body: []byte("yes")})
+	if len(fwd.reqs) != before+1 || fwd.reqs[len(fwd.reqs)-1].ServerID != 3 || fwd.reqs[len(fwd.reqs)-1].PlayerID != 300001 {
+		t.Fatalf("原区服的后续帧应继续转发: %+v", fwd.reqs)
+	}
+
+	g.OnClose(p, nil)
+	disc := fwd.reqs[len(fwd.reqs)-1]
+	if disc.CmdID != logic.CmdDisconnect || !disc.Internal || disc.ServerID != 3 || disc.PlayerID != 300001 {
+		t.Fatalf("断线通知应仍带着绑定的区服和角色: %+v", disc)
+	}
 }
 
 func TestHeartbeatStaysOnGate(t *testing.T) {
