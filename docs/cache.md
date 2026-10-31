@@ -23,13 +23,13 @@
 
 ### Put、Alias 与 Flush
 
-- `Put` 在锁内先调用 `MarkDirty`，再以实体规范键覆盖登记；不会立即写库。
+- `Put` 先 `MarkDirty` 再登记。打脏放在缓存锁外面，是为了和淘汰的加锁顺序一致：淘汰先拿实体锁，再拿缓存锁。不会立即写库。
 - `Alias` 只添加/覆盖同区服同集合下的另一个键，不自动放入规范键，也不打脏标记。
 - `Flush` 锁内枚举当前脏对象，按 `map[entity.Entity]struct{}` 去重，然后解锁逐个保存。别名不会让同一对象重复写入。
 - 实现了 `Persist() (uint64, any)` 的对象优先提供快照；否则使用 `BeginSave()` 和对象本身。保存键始终来自实体的 `ServerID/Collection/CacheKey`，不是别名。
 - 每次 Save 成功后 `EndSave(gen)`；中间又被 `MarkDirty` 的对象继续保持脏状态。
 
-包本身没有定时器。`cmd/logic/main.go` 用 ticker 调用 Flush，配置 `flush_interval` 为空、解析失败或非正数时回退 **1 秒**；[默认配置](../config/logic.yaml) 也是 `1s`。退出路径另 Flush 一次。当前退出顺序是先最终 Flush、后停止 actor/RPC，且 ticker 未显式停止，因此不是已完成协调的停写排空流程。
+包本身没有定时器。`cmd/logic/main.go` 用 ticker 先 Flush 再 Evict。`flush_interval` 为空、解析失败或非正数时回退 **1 秒**；[默认配置](../config/logic.yaml) 也是 `1s`。淘汰由 `cache.max_items` 和 `cache.idle` 控制，两项都是 0 时不淘汰；默认 **20000** 条、空闲 **10m**。退出路径另 Flush 一次，不再淘汰。
 
 ## 主要 API 与使用示例
 
@@ -67,11 +67,11 @@ func example(ctx context.Context) error {
 ## 并发、错误与边界
 
 - 缓存锁保护映射，不保护返回实体的业务字段；业务操作仍须进所属 [actor](actor.md)，刷盘使用独立快照协调。
-- Save 第一次出错就返回；此前成功对象已经清脏，失败对象和后续对象保留脏标记。枚举 map 的顺序不稳定，所以没有固定的失败前缀，也没有全量事务、内部重试或回滚。
+- 某一条 Save 失败会记入返回的 `errors.Join`，本轮继续写后面的实体。此前成功的已经清脏，失败的保持脏标记。上下文取消仍会停下剩余实体。没有全量事务、内部重试或回滚。
 - 存储为 nil 时，Flush 返回 nil，但不保存也不清脏；不能把这个 nil 理解为已经持久化。
 - Get 内存命中不检查上下文取消；Load/Save 的取消行为取决于存储实现。Flush 在开始前和每个实体前检查 `ctx.Err()`。
-- 同一缓存的 Flush / FlushEntity 共用一把刷盘锁。带 `DocVersion` 的快照会在代数或任期落后时返回 `ErrStale`，缓存丢掉这份内存，不再覆盖库里更新的文档。其他保存错误仍会中断本轮剩余实体。
-- 没有 TTL、容量上限或按时间淘汰。`Forget` 只在交出租约时摘掉内存副本。Put/Alias 可覆盖已有键，不报告冲突。别名只在当前内存生效，不自动按 BSON 字段查询。
+- 同一缓存的 Flush、FlushEntity、Evict 共用一把刷盘锁。带 `DocVersion` 的快照在代数或任期落后时返回 `ErrStale`，缓存丢掉这份内存，不再覆盖库里更新的文档。
+- `Policy.Idle` 淘汰空闲实体，`Policy.MaxItems` 再按最久未访问补到容量以内。脏实体必须先保存成功才离开内存；没有存储时脏实体留下。`Guard` 钉住当前邮箱协程碰到的实体，`PinKey` 钉住在线角色的业务编号。淘汰不释放租约，断线和主人交接仍走原来的刷盘加 Release。Put/Alias 可覆盖已有键，不报告冲突。别名只在当前内存生效。
 - 去重使用实体作 map 键，实际实体应使用可比较的指针类型；不可比较的动态值会 panic。nil 实体、返回 nil 的 factory 等也没有防御校验。
 - 键未转义 `|`，集合名/键含分隔符可能产生组合碰撞，调用方应限制命名。
 - `Placement`/`RouteKey` 不参与 Get/Put/Flush；非主人节点不能指望缓存自动转发。缺少 `Persist` 时传给 Save 的还是活实体，存在并发序列化风险。
@@ -80,4 +80,4 @@ func example(ctx context.Context) error {
 
 [TestGetLoadsOnceAndFlushClearsDirty](../pkg/cache/cache_test.go) 验证顺序两次 Get 返回同一对象、`memory.Loads()==1`、修改并 MarkDirty 后 Flush 落库且清脏。测试记录实现 `Persist` 并通过 Capture 生成快照。
 
-当前没有覆盖并发冷读、别名冲突、保存失败、刷盘期间新修改、nil 存储、并发 Flush 或路由归属的专门用例。本文未运行测试；也不据单次顺序读测试推断并发只 Load 一次。
+[cache_evict_test.go](../pkg/cache/cache_evict_test.go) 覆盖空闲淘汰、容量 LRU、在线键钉住、邮箱 Guard、保存失败后继续、刷盘过程中的新修改、ErrStale、nil 存储，以及带 `-race` 的并发提交。并发冷读和路由归属仍没有专门用例。

@@ -52,7 +52,10 @@ func main() {
 		os.Exit(1)
 	}
 	bus := event.New()
-	c := cache.New(store)
+	c := cache.New(store, cache.WithPolicy(cache.Policy{
+		MaxItems: cfg.CacheMaxItems(),
+		Idle:     cfg.CacheIdle(),
+	}))
 	players := service.NewPlayerService(c, store, bus)
 	chat := service.NewChatService(&notifyAll{nodes: nodes})
 	r := router.New[int32]()
@@ -62,6 +65,7 @@ func main() {
 		self = cfg.ListenAddr
 	}
 	owners := newOwners(self, app.Actors, nodes, store)
+	owners.Guard = c.Guard
 	app.Hooks = logic.Hooks{
 		Self:   self,
 		Leases: store,
@@ -89,6 +93,10 @@ func main() {
 		},
 		Kick: func(ctx context.Context, gateAddr, sessionID string) {
 			_ = nodes.Push(ctx, gateAddr, sessionID, logic.CmdKick, nil)
+		},
+		Guard: c.Guard,
+		PinPlayer: func(serverID int32, playerID int64) func() {
+			return c.PinKey(serverID, "player", strconv.FormatInt(playerID, 10))
 		},
 	}
 	guilds := service.NewGuildService(c, store, owners)
@@ -124,6 +132,9 @@ func main() {
 				app.RenewLeases(context.Background())
 				if err := c.Flush(context.Background()); err != nil {
 					log.Error("flush failed", "err", err)
+				}
+				if err := c.Evict(context.Background()); err != nil {
+					log.Error("evict failed", "err", err)
 				}
 			}
 		}

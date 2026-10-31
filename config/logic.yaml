@@ -9,6 +9,9 @@ mongo:
   uri: mongodb://127.0.0.1:27017
   db_prefix: game_
 flush_interval: 1s
+cache:
+  max_items: 20000
+  idle: 10m
 log:
   level: info
   format: text

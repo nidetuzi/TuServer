@@ -50,6 +50,10 @@ func (s *State) Dirty() bool {
 	return s.dirty
 }
 
+// DirtyHeld 报告脏标记。调用方必须已经持有 Lock。
+// 缓存要在这把锁里决定能不能淘汰：Dirty 会先放开锁，刚打上的脏标记就可能被清出内存。
+func (s *State) DirtyHeld() bool { return s.dirty }
+
 // BeginSave 取走当前代数。调用方应在持有同一把业务锁时拷贝字段。
 func (s *State) BeginSave() uint64 {
 	s.mu.Lock()

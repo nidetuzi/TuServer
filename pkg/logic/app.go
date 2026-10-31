@@ -42,7 +42,8 @@ type Session struct {
 
 type binding struct {
 	Session
-	Term uint64
+	Term  uint64
+	unpin func()
 }
 
 // Hooks 是角色单写和踢线用的节点能力。测试可以只填其中几项。
@@ -61,6 +62,12 @@ type Hooks struct {
 	Kick func(ctx context.Context, gateAddr, sessionID string)
 	// Now 供测试固定租约时间。
 	Now func() time.Time
+	// Guard 钉住本次邮箱处理碰到的缓存实体。开始时调用，返回的函数在处理结束时放开。
+	// 邮箱正在改实体时不能淘汰，否则调用方手里的指针会和重新加载的那份分开。
+	Guard func() func()
+	// PinPlayer 在角色保持在线时钉住缓存。断线或交出租约时调用 release。
+	// 两次协议之间邮箱是空的，只靠 Guard 盖不住这段时间。
+	PinPlayer func(serverID int32, playerID int64) (release func())
 }
 
 // App 把协议送进 actor 并维护本节点会话表。
@@ -114,48 +121,63 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 	)
 	key := actorKey(req)
 	runErr := a.Actors.Do(ctx, key, func() {
-		if req.PlayerID > 0 && a.stale(req) {
-			a.kick(ctx, req.GateID, req.SessionID)
-			return
-		}
-		term := uint64(0)
-		if req.PlayerID > 0 {
-			term, err = a.enter(ctx, req)
-			if err != nil {
-				return
-			}
-			ctx = lease.WithTerm(ctx, term)
-		}
-		hctx := handler.New(ctx, handler.Meta{
-			ServerID:  req.ServerID,
-			PlayerID:  req.PlayerID,
-			SessionID: req.SessionID,
-			GateID:    req.GateID,
-			CmdID:     req.CmdID,
-		}).WithLoader(a.Load).WithBind(func(id int64) {
-			req.PlayerID = id
-		})
-		body, dispatchErr := a.Router.Dispatch(req.CmdID, hctx, req.Body)
-		if dispatchErr != nil {
-			err = dispatchErr
-			return
-		}
-		if term == 0 && hctx.PlayerID > 0 {
-			req.PlayerID = hctx.PlayerID
-			term, err = a.enter(ctx, req)
-			if err != nil {
-				return
-			}
-		}
-		resp = Response{PlayerID: hctx.PlayerID, CmdID: req.CmdID, Body: body}
-		if hctx.PlayerID > 0 && req.SessionID != "" {
-			a.bindOnline(ctx, req, hctx.PlayerID, term)
-		}
+		a.withGuard(func() { a.handleInActor(ctx, req, &resp, &err) })
 	})
 	if runErr != nil {
 		return Response{}, runErr
 	}
 	return resp, err
+}
+
+// handleInActor 在角色邮箱里跑完一条协议。拆出来是为了整段都处在 Guard 里面。
+func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, err *error) {
+	if req.PlayerID > 0 && a.stale(req) {
+		a.kick(ctx, req.GateID, req.SessionID)
+		return
+	}
+	term := uint64(0)
+	if req.PlayerID > 0 {
+		term, *err = a.enter(ctx, req)
+		if *err != nil {
+			return
+		}
+		ctx = lease.WithTerm(ctx, term)
+	}
+	hctx := handler.New(ctx, handler.Meta{
+		ServerID:  req.ServerID,
+		PlayerID:  req.PlayerID,
+		SessionID: req.SessionID,
+		GateID:    req.GateID,
+		CmdID:     req.CmdID,
+	}).WithLoader(a.Load).WithBind(func(id int64) {
+		req.PlayerID = id
+	})
+	body, dispatchErr := a.Router.Dispatch(req.CmdID, hctx, req.Body)
+	if dispatchErr != nil {
+		*err = dispatchErr
+		return
+	}
+	if term == 0 && hctx.PlayerID > 0 {
+		req.PlayerID = hctx.PlayerID
+		term, *err = a.enter(ctx, req)
+		if *err != nil {
+			return
+		}
+	}
+	*resp = Response{PlayerID: hctx.PlayerID, CmdID: req.CmdID, Body: body}
+	if hctx.PlayerID > 0 && req.SessionID != "" {
+		a.bindOnline(ctx, req, hctx.PlayerID, term)
+	}
+}
+
+func (a *App) withGuard(fn func()) {
+	if a.Hooks.Guard == nil {
+		fn()
+		return
+	}
+	release := a.Hooks.Guard()
+	defer release()
+	fn()
 }
 
 // RenewLeases 给仍在线的角色续约。空闲连接不再发协议时，也不能让租约自己过期后被另一台节点接走。
@@ -233,15 +255,33 @@ func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term 
 	key := playerActorKey(req.ServerID, playerID)
 	sess := Session{ID: req.SessionID, ServerID: req.ServerID, PlayerID: playerID, GateAddr: req.GateID}
 	a.mu.Lock()
-	a.sessions[req.SessionID] = sess
 	prev, exists := a.bound[key]
+	needPin := !exists || prev.unpin == nil
+	a.mu.Unlock()
+	// 同一角色在线期间只钉一次。每次协议都钉，断线只放开一次，引用会计数漏掉。
+	var pinned func()
+	if needPin && a.Hooks.PinPlayer != nil {
+		pinned = a.Hooks.PinPlayer(req.ServerID, playerID)
+	}
+	var drop []func()
+	a.mu.Lock()
+	a.sessions[req.SessionID] = sess
+	prev, exists = a.bound[key]
 	kickOld := exists && prev.ID != "" && prev.ID != req.SessionID
 	if term == 0 {
 		term = prev.Term
 	}
-	a.bound[key] = binding{Session: sess, Term: term}
+	unpin := prev.unpin
+	if unpin == nil {
+		unpin = pinned
+		pinned = nil
+	}
+	a.bound[key] = binding{Session: sess, Term: term, unpin: unpin}
 	for k, v := range a.bound {
 		if k != key && v.ID == req.SessionID {
+			if v.unpin != nil {
+				drop = append(drop, v.unpin)
+			}
 			delete(a.bound, k)
 		}
 	}
@@ -249,6 +289,12 @@ func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term 
 		delete(a.sessions, prev.ID)
 	}
 	a.mu.Unlock()
+	if pinned != nil {
+		drop = append(drop, pinned)
+	}
+	for _, fn := range drop {
+		fn()
+	}
 	if kickOld {
 		a.kick(ctx, prev.GateAddr, prev.ID)
 	}
@@ -260,26 +306,34 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 		return nil
 	}
 	return a.Actors.Do(ctx, playerActorKey(req.ServerID, req.PlayerID), func() {
-		key := playerActorKey(req.ServerID, req.PlayerID)
-		a.mu.Lock()
-		b, ok := a.bound[key]
-		a.mu.Unlock()
-		if !ok || b.ID != req.SessionID {
-			a.dropSession(req.SessionID)
-			return
-		}
-		if a.Hooks.FlushID != nil {
-			_ = a.Hooks.FlushID(ctx, req.ServerID, "player", req.PlayerID)
-		}
-		if a.Hooks.Leases != nil {
-			_ = lease.Release(ctx, a.Hooks.Leases, req.ServerID, playerLeaseKey(req.ServerID, req.PlayerID), a.Hooks.Self, b.Term)
-		}
-		a.mu.Lock()
-		if cur, still := a.bound[key]; still && cur.ID == req.SessionID {
-			delete(a.bound, key)
-		}
-		delete(a.sessions, req.SessionID)
-		a.mu.Unlock()
+		a.withGuard(func() {
+			key := playerActorKey(req.ServerID, req.PlayerID)
+			a.mu.Lock()
+			b, ok := a.bound[key]
+			a.mu.Unlock()
+			if !ok || b.ID != req.SessionID {
+				a.dropSession(req.SessionID)
+				return
+			}
+			if a.Hooks.FlushID != nil {
+				_ = a.Hooks.FlushID(ctx, req.ServerID, "player", req.PlayerID)
+			}
+			if a.Hooks.Leases != nil {
+				_ = lease.Release(ctx, a.Hooks.Leases, req.ServerID, playerLeaseKey(req.ServerID, req.PlayerID), a.Hooks.Self, b.Term)
+			}
+			var unpin func()
+			a.mu.Lock()
+			if cur, still := a.bound[key]; still && cur.ID == req.SessionID {
+				unpin = cur.unpin
+				delete(a.bound, key)
+			}
+			delete(a.sessions, req.SessionID)
+			a.mu.Unlock()
+			// 刷盘和 Forget 完成后再放开。提前放开的话，淘汰会和这次交接抢同一份脏数据。
+			if unpin != nil {
+				unpin()
+			}
+		})
 	})
 }
 
@@ -336,39 +390,48 @@ func (a *App) relinquish(ctx context.Context, body []byte) error {
 	if rel.Kind == KindGuild {
 		key := owner.Key(rel.ServerID, KindGuild, rel.ID)
 		return a.Actors.Do(ctx, key.String(), func() {
-			if a.Hooks.FlushID != nil {
-				_ = a.Hooks.FlushID(ctx, rel.ServerID, KindGuild, rel.ID)
-			}
-			if a.Hooks.Leases != nil {
-				_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, key.String(), a.Hooks.Self, rel.Term)
-			}
+			a.withGuard(func() {
+				if a.Hooks.FlushID != nil {
+					_ = a.Hooks.FlushID(ctx, rel.ServerID, KindGuild, rel.ID)
+				}
+				if a.Hooks.Leases != nil {
+					_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, key.String(), a.Hooks.Self, rel.Term)
+				}
+			})
 		})
 	}
 	if rel.ID == 0 {
 		return nil
 	}
 	return a.Actors.Do(ctx, playerActorKey(rel.ServerID, rel.ID), func() {
-		key := playerActorKey(rel.ServerID, rel.ID)
-		a.mu.Lock()
-		b, ok := a.bound[key]
-		if ok {
-			delete(a.bound, key)
-			delete(a.sessions, b.ID)
-		}
-		a.mu.Unlock()
-		if a.Hooks.FlushID != nil {
-			_ = a.Hooks.FlushID(ctx, rel.ServerID, KindPlayer, rel.ID)
-		}
-		if a.Hooks.Leases != nil {
-			term := rel.Term
-			if ok && b.Term != 0 {
-				term = b.Term
+		a.withGuard(func() {
+			key := playerActorKey(rel.ServerID, rel.ID)
+			a.mu.Lock()
+			b, ok := a.bound[key]
+			var unpin func()
+			if ok {
+				unpin = b.unpin
+				delete(a.bound, key)
+				delete(a.sessions, b.ID)
 			}
-			_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, playerLeaseKey(rel.ServerID, rel.ID), a.Hooks.Self, term)
-		}
-		if ok && (b.ID != rel.Session || b.GateAddr != rel.Gate) {
-			a.kick(ctx, b.GateAddr, b.ID)
-		}
+			a.mu.Unlock()
+			if a.Hooks.FlushID != nil {
+				_ = a.Hooks.FlushID(ctx, rel.ServerID, KindPlayer, rel.ID)
+			}
+			if a.Hooks.Leases != nil {
+				term := rel.Term
+				if ok && b.Term != 0 {
+					term = b.Term
+				}
+				_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, playerLeaseKey(rel.ServerID, rel.ID), a.Hooks.Self, term)
+			}
+			if unpin != nil {
+				unpin()
+			}
+			if ok && (b.ID != rel.Session || b.GateAddr != rel.Gate) {
+				a.kick(ctx, b.GateAddr, b.ID)
+			}
+		})
 	})
 }
 

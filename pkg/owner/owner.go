@@ -71,6 +71,9 @@ type Runtime struct {
 	operations map[string]operation
 	// Claim 在确认本节点仍是主人后申请任期。失败时操作不会执行。
 	Claim func(context.Context, EntityKey) (uint64, error)
+	// Guard 钉住这次主人邮箱里用到的实体。返回的函数在操作结束时放开。
+	// 为空则不钉。共享实体没有“在线会话”，只能靠邮箱执行期间不让缓存把它换出。
+	Guard func() func()
 }
 
 // New 创建显式配置的主人运行时；缺失依赖会在调用时返回配置错误。
@@ -242,6 +245,10 @@ func (r *Runtime) execute(ctx context.Context, req request) (response, error) {
 	// 结果只经缓冲通道发布；调用上下文提前取消时，不与仍在执行的邮箱协程共享可变结果。
 	completed := make(chan response, 1)
 	err := r.actors.Do(ctx, req.Key.String(), func() {
+		if r.Guard != nil {
+			release := r.Guard()
+			defer release()
+		}
 		result := response{}
 		defer func() {
 			if rec := recover(); rec != nil {

@@ -13,6 +13,7 @@ type rec struct {
 	ID           string `bson:"_id"`
 	Server       int32  `bson:"server_id"`
 	Name         string `bson:"name"`
+	Rev          uint64 `bson:"rev,omitempty"`
 }
 
 func (r *rec) CacheKey() string            { return r.ID }
@@ -20,6 +21,9 @@ func (r *rec) ServerID() int32             { return r.Server }
 func (r *rec) Collection() string          { return "player" }
 func (r *rec) RouteKey() string            { return r.ID }
 func (r *rec) Placement() entity.Placement { return entity.PlacementLocal }
+
+// NoteLoaded 恢复库里的代数。淘汰后再加载如果从 0 开始，条件写会把这份新修改当成过期快照丢掉。
+func (r *rec) NoteLoaded() { r.Restore(r.Rev) }
 
 type snap struct {
 	ID     string `bson:"_id"`

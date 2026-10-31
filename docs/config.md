@@ -24,6 +24,8 @@
 - `mongo.uri`：Logic 使用的 Mongo URI。
 - `mongo.db_prefix`：按 `前缀 + serverID` 选库，例如 `game_3`。
 - `flush_interval`：Logic 定时调用缓存 Flush 的间隔，遵循 Go duration 格式，例如 `1s`、`500ms`。
+- `cache.max_items`：内存中不同实体的上限，超过后按最久未访问淘汰。`0` 或负数表示不按容量淘汰。
+- `cache.idle`：距上次访问超过该时长就可以淘汰，例如 `10m`。空字符串、非法值或负数表示不按空闲淘汰。
 
 日志：`log.level`、`format`、`dir`、`name`、`max_size_mb`、`max_age_days`、`also_stdout`，详细默认值见 [日志文档](log.md)。
 
