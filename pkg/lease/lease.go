@@ -89,6 +89,41 @@ func Release(ctx context.Context, backend store.Locker, serverID int32, key, sel
 	return err
 }
 
+// errTermChanged 表示租约还在本节点，但已经不是调用方记录的那一任期。
+// 不能当成被别人持有，否则续约失败会把本节点仍在线的会话踢掉。
+var errTermChanged = errors.New("lease: term changed")
+
+// Renew 只延长 self 在该任期上仍持有的租约，不接手空闲、过期或别人的租约。
+// 库里没有、已经释放，或持有者不是 self 时返回 ErrHeld。任期对不上时返回其他错误。
+// 两种失败都不写库：内存和 Mongo 的 MutateLease 在 fn 报错时都保持原值。
+func Renew(ctx context.Context, backend store.Locker, serverID int32, key, self string, term uint64, now time.Time, ttl time.Duration) (store.LeaseRec, error) {
+	if backend == nil {
+		return store.LeaseRec{}, errors.New("lease: backend is required")
+	}
+	if ttl <= 0 {
+		ttl = TTL
+	}
+	return backend.MutateLease(ctx, serverID, key, func(cur store.LeaseRec) (store.LeaseRec, error) {
+		return extendOwned(cur, self, term, now.UnixMilli(), ttl)
+	})
+}
+
+func extendOwned(cur store.LeaseRec, self string, term uint64, now int64, ttl time.Duration) (store.LeaseRec, error) {
+	if !cur.Found || cur.Owner != self {
+		return cur, heldBy(cur)
+	}
+	// 旧任期不能把本节点后来拿到的新任期续长，否则断线时按旧任期释放会放空。
+	if term == 0 || cur.Term != term {
+		return cur, errTermChanged
+	}
+	cur.Until = now + ttl.Milliseconds()
+	return cur, nil
+}
+
+func heldBy(cur store.LeaseRec) *HeldError {
+	return &HeldError{Owner: cur.Owner, Term: cur.Term, Until: cur.Until, Gate: cur.Gate, Session: cur.Session}
+}
+
 func decide(cur store.LeaseRec, self, gate, session string, now int64, ttl time.Duration) (store.LeaseRec, error) {
 	until := now + ttl.Milliseconds()
 	if cur.Found && cur.Owner != "" && cur.Owner == self {
@@ -107,5 +142,5 @@ func decide(cur store.LeaseRec, self, gate, session string, now int64, ttl time.
 		}
 		return store.LeaseRec{Owner: self, Term: term, Until: until, Gate: gate, Session: session, Found: true}, nil
 	}
-	return cur, &HeldError{Owner: cur.Owner, Term: cur.Term, Until: cur.Until, Gate: cur.Gate, Session: cur.Session}
+	return cur, heldBy(cur)
 }

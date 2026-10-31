@@ -236,7 +236,9 @@ func (a *App) handleInternal(ctx context.Context, req Request) (Response, error)
 	}
 }
 
-// RenewLeases 给仍在线的角色续约。空闲连接不再发协议时，也不能让租约自己过期后被另一台节点接走。
+// RenewLeases 只延长本节点仍持有的租约。
+// 空闲连接不再发协议时也要续约，否则过期后别的节点会接走还没刷盘的修改。
+// 不能走 enter：Claim 失败时它会 AskRelease。锁外拿着旧快照去 enter，会让新持有者刷盘交出租约并踢掉新会话，旧节点再 Claim 成功，接着发现绑定已经没了又把租约 Release 掉，角色两边都不在线。
 func (a *App) RenewLeases(ctx context.Context) {
 	if a.Hooks.Leases == nil {
 		return
@@ -247,29 +249,86 @@ func (a *App) RenewLeases(ctx context.Context) {
 		list = append(list, b)
 	}
 	a.mu.Unlock()
-	for _, b := range list {
-		req := Request{GateID: b.GateAddr, SessionID: b.ID, ServerID: b.ServerID, PlayerID: b.PlayerID}
-		term, err := a.enter(ctx, req)
-		if err != nil {
-			continue
-		}
-		key := playerActorKey(b.ServerID, b.PlayerID)
-		a.mu.Lock()
-		cur, ok := a.bound[key]
-		if ok && cur.ID == b.ID {
-			cur.Term = term
-			a.bound[key] = cur
-			ok = true
-		} else {
-			ok = false
-		}
-		a.mu.Unlock()
-		if ok || a.Hooks.Leases == nil || term == 0 {
-			continue
-		}
-		// 断线或死网关已经删掉绑定。enter 可能刚把租约又续上，按同一任期还回去，避免角色被空会话占着。
-		_ = lease.Release(ctx, a.Hooks.Leases, b.ServerID, playerLeaseKey(b.ServerID, b.PlayerID), a.Hooks.Self, term)
+	now := time.Now()
+	if a.Hooks.Now != nil {
+		now = a.Hooks.Now()
 	}
+	for _, b := range list {
+		a.renewBound(ctx, b, now)
+	}
+}
+
+// renewBound 续一条快照。先在锁内确认绑定还在且没被换掉，再按持有者和任期续期。
+func (a *App) renewBound(ctx context.Context, b binding, now time.Time) {
+	if !a.bindingUnchanged(b) {
+		return
+	}
+	key := playerActorKey(b.ServerID, b.PlayerID)
+	rec, err := lease.Renew(ctx, a.Hooks.Leases, b.ServerID, playerLeaseKey(b.ServerID, b.PlayerID), a.Hooks.Self, b.Term, now, lease.TTL)
+	if errors.Is(err, lease.ErrHeld) {
+		// 已经被别人持有或已经释放。放弃本地会话，不要再 Claim，更不能 AskRelease。
+		a.abandonLost(ctx, b, err)
+		return
+	}
+	if err != nil {
+		return
+	}
+	a.mu.Lock()
+	cur, ok := a.bound[key]
+	if ok && cur.ID == b.ID && cur.Term == b.Term && cur.GateAddr == b.GateAddr {
+		cur.Term = rec.Term
+		a.bound[key] = cur
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Unlock()
+	if ok {
+		return
+	}
+	// 续约时绑定还在，写完发现断线或死网关已经把它删了。这次只延长了自己的任期，按同一任期还回去，避免没有会话的角色占着租约。
+	_ = lease.Release(ctx, a.Hooks.Leases, b.ServerID, playerLeaseKey(b.ServerID, b.PlayerID), a.Hooks.Self, b.Term)
+}
+
+func (a *App) bindingUnchanged(b binding) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cur, ok := a.bound[playerActorKey(b.ServerID, b.PlayerID)]
+	return ok && cur.ID == b.ID && cur.Term == b.Term && cur.GateAddr == b.GateAddr
+}
+
+// abandonLost 在续约发现租约已经不在本节点时丢掉本地会话。
+// 刷盘放在 withGuard 里，和断线、交接一样，避免淘汰把正在写的实体换掉。
+// FlushID 走原来的条件写：对方任期更新后得到 ErrStale，这份内存会被丢掉，不会覆盖对方存档。
+// 不 Release，也不 AskRelease。缓存钉住要等刷盘结束再放开，否则淘汰会和这次放弃抢同一份脏数据。
+func (a *App) abandonLost(ctx context.Context, b binding, held error) {
+	key := playerActorKey(b.ServerID, b.PlayerID)
+	_ = a.Actors.Do(ctx, key, func() {
+		a.withGuard(func() {
+			a.mu.Lock()
+			cur, ok := a.bound[key]
+			if !ok || cur.ID != b.ID || cur.Term != b.Term || cur.GateAddr != b.GateAddr {
+				a.mu.Unlock()
+				return
+			}
+			unpin := cur.unpin
+			delete(a.bound, key)
+			delete(a.sessions, cur.ID)
+			a.mu.Unlock()
+			owner := ""
+			var herr *lease.HeldError
+			if errors.As(held, &herr) && herr != nil {
+				owner = herr.Owner
+			}
+			log.Warn("renew lease lost", "server_id", cur.ServerID, "player_id", cur.PlayerID, "session_id", cur.ID, "term", cur.Term, "owner", owner)
+			if a.Hooks.FlushID != nil {
+				_ = a.Hooks.FlushID(ctx, cur.ServerID, KindPlayer, cur.PlayerID)
+			}
+			if unpin != nil {
+				unpin()
+			}
+			a.kick(ctx, cur.GateAddr, cur.ID)
+		})
+	})
 }
 
 // ReapGates 按本轮仍注册着的网关地址清理失联会话。
