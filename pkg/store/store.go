@@ -42,7 +42,8 @@ type Locker interface {
 	MutateLease(ctx context.Context, serverID int32, key string, fn func(LeaseRec) (LeaseRec, error)) (LeaseRec, error)
 }
 
-// Versioned 是带代数和任期的落库快照。没有实现该接口的文档仍按整篇覆盖写入。
+// Versioned 是带代数和任期的落库快照。没有实现该接口的文档不做条件写。
+// 两种文档都按字段更新，不整篇替换。
 type Versioned interface {
 	DocVersion() (rev, fence uint64)
 }

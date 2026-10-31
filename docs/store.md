@@ -13,7 +13,7 @@
 `Store` 包含四个方法：
 
 - `Load(ctx context.Context, serverID int32, collection, key string, dest any) error`：按主键解码到 dest。
-- `Save(ctx context.Context, serverID int32, collection, key string, doc any) error`：覆盖文档。
+- `Save(ctx context.Context, serverID int32, collection, key string, doc any) error`：按本进程认识的顶层字段更新。库里这份快照没有的字段保留。
 - `Find(ctx context.Context, serverID int32, collection, field string, value any, dest any) error`：按一个字段找一条文档。
 - `NextID(ctx context.Context, serverID int32, name string) (int64, error)`：返回区服内、指定名字计数器的下一序号，不是已编码的业务编号。
 
@@ -23,7 +23,7 @@
 
 `memory.New()` 初始化文档表与计数器表。文档以 `collection|serverID|key` 定位，存储的是 BSON 字节而不是传入对象指针；Load 再反序列化。因此可以验证 BSON tag 和落库快照，不等同于 Mongo 服务端行为。
 
-- Save 先在锁外 `bson.Marshal`，成功后锁内覆盖文档；不能靠存储锁保护调用方正在变化的对象。
+- Save 先在锁外 `bson.Marshal`，成功后在锁内把这次编码出现的顶层字段盖到已有文档上。文档不存在时整篇写入。不能靠存储锁保护调用方正在变化的对象。带版本的快照在库里代数或任期更高时返回 `ErrStale`，不写入。
 - Load 在锁内增加调用计数，再查记录并解码；不存在也会计数。`Loads()` 返回所有 Load 的累计次数，Find 不计入。
 - Find 锁内扫描指定区服/集合，解码成 `bson.M`，用 `probe[field] == value` 比较第一个命中；map 遍历没有稳定顺序。
 - NextID 在同一把 mutex 下自增，每个 `(serverID, name)` 从 **1** 开始；仅在这个 Store 实例中唯一，不持久化、不跨进程共享。
@@ -34,7 +34,7 @@
 `mongo.Open(ctx, uri, prefix)` 使用官方驱动 `Connect`。prefix 为空时默认 **`game_`**；区服 3 对应 `game_3`，集合使用传入名字。Open 没有显式 Ping，不保证返回时已验证远端可用；连接、池和超时没有本包自定义默认值，取 URI/驱动配置与 context 的行为。
 
 - Load：`FindOne({_id: idValue(key)})` 并 Decode。
-- Save：`ReplaceOne({_id: idValue(key)}, doc, upsert=true)`，是整体替换而不是局部 `$set`。旧文档中本次 doc 缺失的字段不会自动保留。
+- Save：已有文档用 `$set` 写入本次编码的顶层字段（不含 `_id`），不删除未知字段。带版本时过滤条件仍是代数和任期都不比快照新；没命中且主键不存在才 `InsertOne`，主键冲突返回 `ErrStale`。不带版本时 `$set` 带 upsert。
 - Find：`FindOne({field: value})`，无排序；多条匹配时不承诺哪条。Load/Find 将驱动 `ErrNoDocuments` 转成公共 `ErrNotFound`，其他错误原样返回。
 - `idValue` 将合法的 **24 位十六进制 ObjectID 字符串**转换为 BSON ObjectID，转换失败才保留字符串。纯字符串主键如果恰好符合该格式，也会被转换；memory 没有这一步。
 - `Close(ctx)` 调用驱动 Disconnect；它不属于 Store 接口，也不替调用方 Flush。
@@ -65,15 +65,15 @@ func inspectCounter(ctx context.Context) (int64, error) {
 
 - BSON 编解码、Mongo 网络、权限、超时、不可变 `_id` 等错误直接上交；缓存决定失败后保留脏状态。
 - memory Find 是 Go 等值比较，不支持 Mongo 的查询操作符、嵌套字段语义或类型转换；BSON 解码后的整数类型与 value 类型不一致可能不命中，缺失字段与 nil 也可能被视为相等。若比较到相同动态类型的不可比较值，可能 panic。
-- memory 不校验文档 `_id` 和存储 key 是否一致；Mongo 则受主键与替换写规则约束。memory 单测不能证明 Mongo 唯一索引、网络失败、原子 upsert 行为正确。
+- memory 不校验文档 `_id` 和存储 key 是否一致；Mongo 不通过 `$set` 修改 `_id`。memory 单测不能证明 Mongo 唯一索引、网络失败、原子 upsert 行为正确。
 - 两实现不验证 serverID、集合名、计数器名，也不限制序号到 99999；调用方必须用 `entity.WithServer` 校验编码范围。序号被获取后失败不会退回，不能要求连续无空洞。
 - Mongo `$inc` 保证服务端单次操作的原子性，但当前 NextID 的通用错误重试不能承诺端到端恰好一次；网络结果不确定时可能耗掉序号。
-- 没有自动创建名字或业务编号唯一索引；并发业务创建和幂等性需要上层处理。Store 也不提供防止旧快照覆盖新快照的版本条件。
+- 没有自动创建名字或业务编号唯一索引；并发业务创建和幂等性需要上层处理。带版本的保存会拒绝代数或任期更旧的快照。
 - memory 字符串组合键没有转义分隔符 `|`，应限制集合/键/计数器命名，避免歧义。
 
 ## 相关测试
 
-当前 `pkg/store`、`pkg/store/memory`、`pkg/store/mongo` 都没有专门测试文件，也没有 Mongo 集成测试。
+`pkg/store/memory`、`pkg/store/internal/partial` 和 `pkg/store/mongo` 有单测，覆盖未知字段保留、过期快照拒绝和 `$set` 文档形状。没有连上真实 Mongo 的集成测试。
 
 - [缓存测试](../pkg/cache/cache_test.go) 间接覆盖 memory Save/Load、BSON 持久化与 Loads。
 - [服务测试](../example/demo/service/guild_test.go) 的 `TestLoginUsesObjectIDAndIncrement` 覆盖 memory NextID、业务编号、Find 与重新加载；公会相关用例还使用共享 memory 存储检查主人缓存与重新加载。这里描述测试内容，不声明运行通过。

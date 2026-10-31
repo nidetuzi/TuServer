@@ -7,6 +7,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 
 	"tuserv/pkg/store"
+	"tuserv/pkg/store/internal/partial"
 )
 
 type record struct {
@@ -52,22 +53,29 @@ func (s *Store) Load(_ context.Context, serverID int32, collection, key string, 
 	return bson.Unmarshal(rec.raw, dest)
 }
 
-// Save 覆盖主键对应的文档。带版本的快照在库里代数或任期更高时返回 ErrStale。
+// Save 按本进程认识的字段更新。带版本的快照在库里代数或任期更高时返回 ErrStale。
+// 已有文档只覆盖这次编码里出现的键，避免滚动升级时旧结构抹掉新字段；没有旧文档时仍整篇写入。
 func (s *Store) Save(_ context.Context, serverID int32, collection, key string, doc any) error {
-	raw, err := bson.Marshal(doc)
+	fresh, err := bson.Marshal(doc)
 	if err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := id(serverID, collection, key)
-	if rev, fence, ok := store.DocVersion(doc); ok {
-		if old, exists := s.docs[k]; exists {
-			dbRev, dbFence := versionFromRaw(old.raw)
+	var old bson.Raw
+	if cur, exists := s.docs[k]; exists {
+		if rev, fence, ok := store.DocVersion(doc); ok {
+			dbRev, dbFence := versionFromRaw(cur.raw)
 			if store.Stale(dbRev, dbFence, rev, fence) {
 				return store.ErrStale
 			}
 		}
+		old = cur.raw
+	}
+	raw, err := partial.MergeKnown(old, fresh)
+	if err != nil {
+		return err
 	}
 	if err := s.checkUniqueLocked(serverID, collection, key, raw); err != nil {
 		return err

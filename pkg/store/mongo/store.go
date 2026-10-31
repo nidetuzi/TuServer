@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"tuserv/pkg/store"
+	"tuserv/pkg/store/internal/partial"
 )
 
 // Store 是一个 Mongo 客户端，库名形如 game_1。
@@ -45,20 +46,47 @@ func (s *Store) Load(ctx context.Context, serverID int32, collection, key string
 	return err
 }
 
-// Save 用替换写入。带版本的快照只在库里的代数和任期都不比快照新时覆盖，避免旧刷盘打回新数据。
+// Save 按字段更新。带版本的快照只在库里的代数和任期都不比快照新时写入，避免旧刷盘打回新数据。
+// 用 $set 写本进程编码出来的字段，不认识的字段留在库里。快照已经是这次要落库的已知结构，不再另做字段级脏追踪。
 func (s *Store) Save(ctx context.Context, serverID int32, collection, key string, doc any) error {
 	coll := s.coll(serverID, collection)
 	id := idValue(key)
-	rev, fence, ok := store.DocVersion(doc)
-	if !ok {
-		_, err := coll.ReplaceOne(ctx, bson.M{"_id": id}, doc, options.Replace().SetUpsert(true))
-		return err
-	}
-	res, err := coll.ReplaceOne(ctx, versionFilter(id, rev, fence), doc)
+	fields, err := partial.KnownFields(doc)
 	if err != nil {
 		return err
 	}
-	if res.MatchedCount > 0 {
+	rev, fence, ok := store.DocVersion(doc)
+	if !ok {
+		return upsertFields(ctx, coll, id, fields)
+	}
+	return updateVersioned(ctx, coll, id, rev, fence, fields, doc)
+}
+
+// upsertFields 用于没有代数的文档。仍要能插入，但不能整篇替换。
+func upsertFields(ctx context.Context, coll *drv.Collection, id any, fields bson.D) error {
+	if len(fields) == 0 {
+		// 空的 $set 会被服务端拒绝。没有可写字段时只保证主键在，不碰已有的键。
+		n, err := coll.CountDocuments(ctx, bson.M{"_id": id})
+		if err != nil || n > 0 {
+			return err
+		}
+		_, err = coll.InsertOne(ctx, bson.D{{Key: "_id", Value: id}})
+		if drv.IsDuplicateKeyError(err) {
+			return nil
+		}
+		return err
+	}
+	_, err := coll.UpdateOne(ctx, bson.M{"_id": id}, fieldUpdate(fields), options.Update().SetUpsert(true))
+	return err
+}
+
+// updateVersioned 保持原来的条件写：命中才更新，没有文档才插入，主键冲突视为快照已过期。
+func updateVersioned(ctx context.Context, coll *drv.Collection, id any, rev, fence uint64, fields bson.D, doc any) error {
+	matched, err := matchUpdate(ctx, coll, versionFilter(id, rev, fence), fields)
+	if err != nil {
+		return err
+	}
+	if matched {
 		return nil
 	}
 	n, err := coll.CountDocuments(ctx, bson.M{"_id": id})
@@ -73,6 +101,24 @@ func (s *Store) Save(ctx context.Context, serverID int32, collection, key string
 		return err
 	}
 	return store.ErrStale
+}
+
+func matchUpdate(ctx context.Context, coll *drv.Collection, filter any, fields bson.D) (bool, error) {
+	if len(fields) == 0 {
+		// 没有字段可写时不能发空 $set，只确认条件是否命中。
+		n, err := coll.CountDocuments(ctx, filter)
+		return n > 0, err
+	}
+	res, err := coll.UpdateOne(ctx, filter, fieldUpdate(fields))
+	if err != nil {
+		return false, err
+	}
+	return res.MatchedCount > 0, nil
+}
+
+// fieldUpdate 是 $set 文档。调用方保证 fields 非空，空 $set 在服务端是非法更新。
+func fieldUpdate(fields bson.D) bson.D {
+	return bson.D{{Key: "$set", Value: fields}}
 }
 
 // Insert 只插入新文档。主键或唯一索引冲突时返回 ErrDuplicate。
