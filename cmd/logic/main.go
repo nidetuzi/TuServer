@@ -19,6 +19,7 @@ import (
 	"tuserv/pkg/cache"
 	"tuserv/pkg/cluster"
 	"tuserv/pkg/config"
+	"tuserv/pkg/entity"
 	"tuserv/pkg/event"
 	"tuserv/pkg/log"
 	"tuserv/pkg/logic"
@@ -57,14 +58,20 @@ func main() {
 		os.Exit(1)
 	}
 	bus := event.New()
+	var app *logic.App
 	c := cache.New(store, cache.WithPolicy(cache.Policy{
 		MaxItems: cfg.CacheMaxItems(),
 		Idle:     cfg.CacheIdle(),
+	}), cache.WithStaleHandler(func(e entity.Entity, _, fence uint64) func() {
+		if p, ok := e.(*demoentity.Player); ok && app != nil {
+			return app.PrepareStalePlayer(p.ServerID(), p.Snapshot().PlayerID, fence)
+		}
+		return nil
 	}))
 	players := service.NewPlayerService(c, store, bus)
 	chat := service.NewChatService(&notifyAll{nodes: nodes})
 	r := router.New[int32]()
-	app := logic.New(r, players.GetByID)
+	app = logic.New(r, players.GetByID)
 	self := cfg.AdvertiseAddr
 	if self == "" {
 		self = cfg.ListenAddr

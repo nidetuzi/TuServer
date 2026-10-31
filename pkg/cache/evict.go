@@ -23,6 +23,12 @@ type Policy struct {
 // Option 调整缓存。放在 New 上，是为了不改已有的 New(store) 调用。
 type Option func(*Cache)
 
+// WithStaleHandler 在保存前捕获会话身份，只有条件写失败时才调用返回的通知。
+// 通知处于刷盘流程内，只能投递异步任务，不能同步调用 Flush 或等待业务 actor。
+func WithStaleHandler(prepare func(entity.Entity, uint64, uint64) func()) Option {
+	return func(c *Cache) { c.prepareStale = prepare }
+}
+
 // WithPolicy 打开淘汰。负数按关闭处理，避免配错把缓存立刻清空。
 func WithPolicy(p Policy) Option {
 	if p.MaxItems < 0 {

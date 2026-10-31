@@ -60,8 +60,9 @@ type Session struct {
 
 type binding struct {
 	Session
-	Term  uint64
-	unpin func()
+	Term    uint64
+	unpin   func()
+	invalid bool
 }
 
 // Hooks 是角色单写和踢线用的节点能力。测试可以只填其中几项。
@@ -365,6 +366,7 @@ func (a *App) abandonLostInActor(ctx context.Context, b binding, held error) {
 	delete(a.bound, key)
 	delete(a.sessions, cur.ID)
 	a.mu.Unlock()
+	a.Actors.Retire("session/" + cur.ID)
 	owner := ""
 	var herr *lease.HeldError
 	if errors.As(held, &herr) && herr != nil {
@@ -473,7 +475,7 @@ func (a *App) stale(req Request) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	b, ok := a.bound[playerActorKey(req.ServerID, req.PlayerID)]
-	return ok && b.ID != "" && req.SessionID != "" && b.ID != req.SessionID
+	return ok && (b.invalid || (b.ID != "" && req.SessionID != "" && b.ID != req.SessionID))
 }
 
 func (a *App) boundSession(req Request) (binding, bool) {
@@ -508,7 +510,7 @@ func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term 
 		unpin = pinned
 		pinned = nil
 	}
-	a.bound[key] = binding{Session: sess, Term: term, unpin: unpin}
+	a.bound[key] = binding{Session: sess, Term: term, unpin: unpin, invalid: exists && prev.ID == sess.ID && prev.Term == term && prev.invalid}
 	for k, v := range a.bound {
 		if k != key && v.ID == req.SessionID {
 			if v.unpin != nil {
@@ -528,11 +530,15 @@ func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term 
 		fn()
 	}
 	if kickOld {
+		a.Actors.Retire("session/" + prev.ID)
 		a.kick(ctx, prev.GateAddr, prev.ID)
 	}
 }
 
 func (a *App) onDisconnect(ctx context.Context, req Request) error {
+	if req.SessionID != "" {
+		defer a.Actors.Retire("session/" + req.SessionID)
+	}
 	if req.PlayerID <= 0 {
 		if req.GateID != "" && !a.onGate(req.SessionID, req.GateID) {
 			return nil

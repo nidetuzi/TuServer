@@ -10,12 +10,17 @@ import (
 type abandonTask struct {
 	binding binding
 	held    error
+	stale   bool
 }
 
 // RenewErrorCount 返回未能确认续租成功的累计条数，便于节点监控区分存储故障和失租。
 func (a *App) RenewErrorCount() uint64 { return a.renewErrors.Load() }
 
 func (a *App) queueAbandon(b binding, held error) {
+	a.queueCleanup(b, held, false)
+}
+
+func (a *App) queueCleanup(b binding, held error, stale bool) {
 	key := playerActorKey(b.ServerID, b.PlayerID)
 	a.abandonMu.Lock()
 	defer a.abandonMu.Unlock()
@@ -26,7 +31,7 @@ func (a *App) queueAbandon(b binding, held error) {
 	if _, ok := a.abandonPending[key]; ok {
 		return
 	}
-	a.abandonPending[key] = &abandonTask{binding: b, held: held}
+	a.abandonPending[key] = &abandonTask{binding: b, held: held, stale: stale}
 	if a.abandonActive < DefaultReapParallel {
 		a.abandonActive++
 		go a.abandonWorker()
@@ -58,7 +63,13 @@ func (a *App) abandonWorker() {
 		err := a.Actors.Do(context.Background(), key, func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			a.withGuard(func() { a.abandonLostInActor(ctx, task.binding, task.held) })
+			a.withGuard(func() {
+				if task.stale {
+					a.discardStaleInActor(ctx, task.binding)
+				} else {
+					a.abandonLostInActor(ctx, task.binding, task.held)
+				}
+			})
 		})
 		if err != nil {
 			log.Warn("abandon lease failed", "err", err, "player_id", task.binding.PlayerID, "server_id", task.binding.ServerID)

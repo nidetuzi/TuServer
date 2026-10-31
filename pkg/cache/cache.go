@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"tuserv/pkg/entity"
+	"tuserv/pkg/log"
 	"tuserv/pkg/store"
 )
 
@@ -37,12 +38,13 @@ type Cache struct {
 	items   map[string]entity.Entity
 	meta    map[entity.Entity]*meta
 	// keyPins 按缓存键钉住。在线角色只知道业务编号，实体指针要等别名挂上才能对上。
-	keyPins map[string]int
-	guards  map[int64]*guard
-	guardN  atomic.Int32
-	store   store.Store
-	policy  Policy
-	clock   func() time.Time
+	keyPins      map[string]int
+	guards       map[int64]*guard
+	guardN       atomic.Int32
+	store        store.Store
+	policy       Policy
+	clock        func() time.Time
+	prepareStale func(entity.Entity, uint64, uint64) func()
 }
 
 // New 用给定存储创建缓存。store 为 nil 时只能使用 Put 进来的内存数据。
@@ -256,6 +258,11 @@ func (c *Cache) FlushEntity(ctx context.Context, e entity.Entity) error {
 
 func (c *Cache) saveOne(ctx context.Context, e entity.Entity) error {
 	gen, doc := persistOf(e)
+	rev, fence, _ := store.DocVersion(doc)
+	var stale func()
+	if c.prepareStale != nil {
+		stale = c.prepareStale(e, rev, fence)
+	}
 	err := c.store.Save(ctx, e.ServerID(), e.Collection(), e.CacheKey(), doc)
 	if errors.Is(err, store.ErrStale) {
 		// 快照已经落后。留在内存里会在下一轮把更新的文档盖掉，所以整份丢掉。
@@ -263,6 +270,10 @@ func (c *Cache) saveOne(ctx context.Context, e entity.Entity) error {
 		c.mu.Lock()
 		c.forgetLocked(e)
 		c.mu.Unlock()
+		log.Warn("stale entity discarded", "server_id", e.ServerID(), "collection", e.Collection(), "key", e.CacheKey(), "rev", rev, "fence", fence)
+		if stale != nil {
+			stale()
+		}
 		return nil
 	}
 	if err != nil {

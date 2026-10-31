@@ -93,7 +93,19 @@ func TestFlushDoesNotOverwriteNewerFence(t *testing.T) {
 	if err := mem.Save(ctx, 1, "player", "9", newer); err != nil {
 		t.Fatal(err)
 	}
-	c := New(mem)
+	var notified int
+	var c *Cache
+	c = New(mem, WithStaleHandler(func(e entity.Entity, rev, fence uint64) func() {
+		if rev != 3 || fence != 1 {
+			t.Fatalf("通知的快照版本错误: rev=%d fence=%d", rev, fence)
+		}
+		return func() {
+			notified++
+			if c.Len() != 0 {
+				t.Error("通知前必须先丢弃冲突实体")
+			}
+		}
+	}))
 	stale := &rec{ID: "9", Server: 1, Name: "old"}
 	stale.InitRev(2)
 	stale.Name = "old"
@@ -108,6 +120,9 @@ func TestFlushDoesNotOverwriteNewerFence(t *testing.T) {
 	}
 	if loaded.Name != "new" || loaded.Fence != 4 {
 		t.Fatalf("旧快照覆盖了新文档: %+v", loaded)
+	}
+	if notified != 1 {
+		t.Fatalf("冲突应通知一次: %d", notified)
 	}
 	if _, err := c.Get(ctx, 1, "player", "9", nil); err == nil {
 		t.Fatal("过期实体应被移出缓存")
