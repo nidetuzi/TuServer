@@ -1,12 +1,21 @@
 package router
 
 import (
+	"errors"
 	"fmt"
 
 	"google.golang.org/protobuf/proto"
 
 	"tuserv/pkg/handler"
 )
+
+// ErrNoHandler 表示这个键没有注册处理函数。
+// 单独的哨兵是为了让外层把它编成客户端错误码，而不是当成节点故障。
+var ErrNoHandler = errors.New("router: no handler")
+
+// ErrBadMessage 表示正文不是该协议的 protobuf。
+// 这是客户端把包发错了，换一台 Logic 也不会成功。
+var ErrBadMessage = errors.New("router: bad message")
 
 // Handler 是已经反序列化之前的原始处理函数。
 // 业务注册走 Register，只有测试或非 protobuf 协议才直接使用它。
@@ -31,7 +40,7 @@ func (r *Router[K]) Handle(key K, h Handler) {
 func (r *Router[K]) Dispatch(key K, ctx *handler.Context, body []byte) ([]byte, error) {
 	h, ok := r.handlers[key]
 	if !ok {
-		return nil, fmt.Errorf("router: no handler for %v", key)
+		return nil, fmt.Errorf("%w: %v", ErrNoHandler, key)
 	}
 	return h(ctx, body)
 }
@@ -48,7 +57,7 @@ func Register[K comparable, Req any, PReq interface {
 	r.Handle(key, func(ctx *handler.Context, body []byte) ([]byte, error) {
 		var req Req
 		if err := proto.Unmarshal(body, PReq(&req)); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrBadMessage, err)
 		}
 		resp, err := h(ctx, &req)
 		if err != nil {

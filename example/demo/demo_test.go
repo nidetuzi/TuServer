@@ -2,7 +2,6 @@ package demo
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -15,9 +14,11 @@ import (
 	"tuserv/example/demo/service"
 	"tuserv/pkg/cache"
 	core "tuserv/pkg/entity"
+	"tuserv/pkg/errcode"
 	"tuserv/pkg/event"
 	"tuserv/pkg/logic"
 	"tuserv/pkg/owner"
+	"tuserv/pkg/protocol"
 	"tuserv/pkg/router"
 	"tuserv/pkg/store/memory"
 )
@@ -97,11 +98,18 @@ func TestDemoFlows(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, err = app.Handle(context.Background(), logic.Request{
+	resp, err = app.Handle(context.Background(), logic.Request{
 		SessionID: "s1", ServerID: 3, PlayerID: login.GetPlayerId(), CmdID: handler.CmdUseItem, Body: useBody,
 	})
-	if !errors.Is(err, service.ErrNotEnough) {
-		t.Fatalf("道具不足应返回业务错误: %v", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fault, err := protocol.UnmarshalError(resp.Body)
+	if err != nil || resp.CmdID != protocol.CmdError || fault.Code != errcode.NotEnough || fault.ReqCmd != handler.CmdUseItem {
+		t.Fatalf("道具不足应回错误包: cmd=%d err=%v body=%+v", resp.CmdID, err, fault)
+	}
+	if p.(*entity.Player).BagCount(entity.RewardItemID) != 0 {
+		t.Fatal("道具不足不应把数量扣成负数")
 	}
 
 	chatBody, _ := proto.Marshal(&game.ChatReq{Text: "hi"})

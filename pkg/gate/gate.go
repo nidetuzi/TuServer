@@ -72,6 +72,8 @@ func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 		CmdID:     pkt.CmdID,
 		Body:      pkt.Body,
 	})
+	// 业务错误已经编码进回包，这里的 err 只剩选路和传输失败。
+	// 清掉地址是为了下一帧重选节点；玩法失败不能走这里，否则客户端既看不到错误码，也会丢掉还活着的 Logic。
 	if err != nil {
 		log.Warn("dispatch", "err", err, "session_id", p.ID(), "logic", s.logicAddr)
 		s.logicAddr = ""

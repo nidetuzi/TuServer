@@ -1,13 +1,19 @@
 package service
 
-import "errors"
+import "tuserv/pkg/errcode"
 
-// 这些错误返回给调用方，用来区分参数不合法和库存不足，而不是都变成一次内部失败。
+// 这些哨兵把参数错误和库存不足分开。客户端只看错误码，服务端仍用 errors.Is 区分同码的不同原因。
 var (
-	ErrBadName        = errors.New("service: bad name")
-	ErrBadExp         = errors.New("service: bad exp")
-	ErrBadArg         = errors.New("service: bad arg")
-	ErrBadText        = errors.New("service: bad text")
-	ErrNotEnough      = errors.New("service: not enough items")
-	ErrAlreadyInGuild = errors.New("service: already in guild")
+	// ErrBadName 表示角色或公会名字为空，或超过 16 字节。
+	ErrBadName = errcode.New(errcode.BadArg, "service: bad name")
+	// ErrBadExp 表示经验不是正数。
+	ErrBadExp = errcode.New(errcode.BadArg, "service: bad exp")
+	// ErrBadArg 表示道具号、数量或公会号不合法。
+	ErrBadArg = errcode.New(errcode.BadArg, "service: bad arg")
+	// ErrBadText 表示聊天正文长度不在允许范围内。
+	ErrBadText = errcode.New(errcode.BadArg, "service: bad text")
+	// ErrNotEnough 表示背包数量不足，本次不会扣减。
+	ErrNotEnough = errcode.New(errcode.NotEnough, "service: not enough items")
+	// ErrAlreadyInGuild 表示角色已经有公会。
+	ErrAlreadyInGuild = errcode.New(errcode.AlreadyInGuild, "service: already in guild")
 )

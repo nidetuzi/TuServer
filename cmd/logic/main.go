@@ -197,6 +197,8 @@ type logicAPI struct {
 	nodes *cluster.Nodes
 }
 
+// Dispatch 把网关转发的一帧送进玩家 actor。
+// 返回的 error 只留给 Kitex，表示传输或节点没有正常结束。参数、库存、路由和玩法 panic 会变成统一错误包，error 保持 nil，网关才不会拆掉绑定。
 func (s *logicAPI) Dispatch(ctx context.Context, req *node.DispatchReq) (*node.DispatchResp, error) {
 	resp, err := s.app.Handle(ctx, logic.Request{
 		GateID:    req.GetGateId(),

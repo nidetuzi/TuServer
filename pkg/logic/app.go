@@ -10,6 +10,7 @@ import (
 	"tuserv/pkg/actor"
 	"tuserv/pkg/handler"
 	"tuserv/pkg/lease"
+	"tuserv/pkg/log"
 	"tuserv/pkg/owner"
 	"tuserv/pkg/router"
 	"tuserv/pkg/store"
@@ -97,6 +98,7 @@ func New(r *router.Router[int32], load handler.Loader) *App {
 
 // Handle 在该角色的 actor 里执行协议。已登录的请求按角色编号串行，而不是按连接。
 // cmdId 小于 0 且不是内部交接时，表示网关通知连接已断开。
+// 玩法失败会编成统一错误包，并返回 nil error。非 nil 只表示这次请求没有在本节点正常结束，网关应重选。
 func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 	if req.CmdID == CmdRelinquish {
 		if req.GateID != InternalCaller {
@@ -116,29 +118,50 @@ func (a *App) Handle(ctx context.Context, req Request) (Response, error) {
 		return Response{Body: body}, err
 	}
 	var (
-		resp Response
-		err  error
+		resp  Response
+		biz   error
+		fatal error
 	)
 	key := actorKey(req)
 	runErr := a.Actors.Do(ctx, key, func() {
-		a.withGuard(func() { a.handleInActor(ctx, req, &resp, &err) })
+		// 玩法 panic 不能变成空包成功。邮箱自己也会吞掉 panic，所以要在回调里收成内部错误码。
+		// recover 放在 Guard 外面，panic 时先放开缓存钉住，再回内部错误码。
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("actor panic", "actor", key, "panic", rec)
+				fatal = nil
+				biz = errPanic
+				resp = Response{}
+			}
+		}()
+		a.withGuard(func() { a.handleInActor(ctx, req, &resp, &biz, &fatal) })
 	})
 	if runErr != nil {
 		return Response{}, runErr
 	}
-	return resp, err
+	if fatal != nil {
+		return Response{}, fatal
+	}
+	if biz != nil {
+		return clientError(req, biz), nil
+	}
+	return resp, nil
 }
 
 // handleInActor 在角色邮箱里跑完一条协议。拆出来是为了整段都处在 Guard 里面。
-func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, err *error) {
+// 玩法错误写入 biz，租约失败写入 fatal。两者不能合成一个 error，否则网关会拆掉还活着的 Logic。
+func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, biz, fatal *error) {
 	if req.PlayerID > 0 && a.stale(req) {
 		a.kick(ctx, req.GateID, req.SessionID)
 		return
 	}
 	term := uint64(0)
 	if req.PlayerID > 0 {
-		term, *err = a.enter(ctx, req)
-		if *err != nil {
+		var err error
+		term, err = a.enter(ctx, req)
+		if err != nil {
+			// 拿不到写权说明这台节点现在服务不了这个角色，调用方应按节点故障重选。
+			*fatal = err
 			return
 		}
 		ctx = lease.WithTerm(ctx, term)
@@ -154,13 +177,15 @@ func (a *App) handleInActor(ctx context.Context, req Request, resp *Response, er
 	})
 	body, dispatchErr := a.Router.Dispatch(req.CmdID, hctx, req.Body)
 	if dispatchErr != nil {
-		*err = dispatchErr
+		*biz = dispatchErr
 		return
 	}
 	if term == 0 && hctx.PlayerID > 0 {
 		req.PlayerID = hctx.PlayerID
-		term, *err = a.enter(ctx, req)
-		if *err != nil {
+		var err error
+		term, err = a.enter(ctx, req)
+		if err != nil {
+			*fatal = err
 			return
 		}
 	}

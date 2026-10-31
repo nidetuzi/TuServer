@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -42,6 +43,20 @@ func TestIntAndStringKeys(t *testing.T) {
 	}
 	if got.GetValue() != "b-s" {
 		t.Fatalf("string 路由结果不符: %s", got.GetValue())
+	}
+}
+
+func TestMissingHandlerAndBadMessage(t *testing.T) {
+	ctx := handler.New(context.Background(), handler.Meta{})
+	r := New[int32]()
+	if _, err := r.Dispatch(99, ctx, nil); !errors.Is(err, ErrNoHandler) {
+		t.Fatalf("未注册应返回哨兵: %v", err)
+	}
+	Register(r, int32(7), func(*handler.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+		return &wrapperspb.StringValue{}, nil
+	})
+	if _, err := r.Dispatch(7, ctx, []byte{0xff}); !errors.Is(err, ErrBadMessage) {
+		t.Fatalf("坏 protobuf 应返回哨兵: %v", err)
 	}
 }
 
