@@ -75,12 +75,12 @@ func TestPeerDropsQueuedPacketsAfterShutdown(t *testing.T) {
 
 func TestOpenReceivesRequestURIBeforePackets(t *testing.T) {
 	h := &openOrderHandler{opened: make(chan string, 2), packets: make(chan struct{}, 2)}
-	s, err := Serve("127.0.0.1:0", protocol.FrameCodec{}, h, 0)
+	s, err := Serve("127.0.0.1:0", "/custom", protocol.FrameCodec{}, h, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Stop()
-	uris := []string{"/ws?sid=12&token=a", "/ws?token=b&sid=34"}
+	uris := []string{"/custom?sid=12&token=a", "/custom?token=b&sid=34"}
 	for _, want := range uris {
 		conn := dialWebSocket(t, s.Addr(), want)
 		frame, err := (protocol.FrameCodec{}).Encode(protocol.Packet{CmdID: 7})

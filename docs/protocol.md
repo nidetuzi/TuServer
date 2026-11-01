@@ -40,7 +40,7 @@
 
 ### WebSocket
 
-1. `ws.Serve(addr, codec, handler)` 创建 HTTP mux，固定注册 **`/ws`**；示例地址是 `ws://127.0.0.1:8002/ws`。本入口没有配置 TLS。
+1. `ws.Serve(addr, path, codec, handler, idle)` 创建 HTTP mux，由调用方传入路径；Gate 示例地址是 `ws://127.0.0.1:8002/ws`。本入口没有配置 TLS。
 2. Upgrade 成功后同样生成服务器内递增 ID、容量 128 的队列及消费协程，再调用 `OnOpen`。
 3. 每次 `OnMessage` 复制消息内容，调用一次 `codec.Decode`，然后入队；无 TCP Assembler。
 4. 推荐约定：**一条 WebSocket 二进制消息只装一帧完整的默认协议帧**，仍包含 4 字节长度头，不能只发 protobuf body。

@@ -17,7 +17,7 @@
 - `listen_addr`：本机 Kitex 监听地址。示例配置是 `127.0.0.1:9101`。写成 `:9101` 或 `0.0.0.0` 会监听所有网卡，仅在明确需要时使用。
 - `advertise_addr`：其他节点实际可访问的 Kitex 地址，例如 `127.0.0.1:9101`；跨机器部署不能使用回环地址。
 - `cluster_secret`：节点间 Kitex HMAC 共享密钥。环境变量 `TUSERV_CLUSTER_SECRET` 优先。两者都空时进程拒绝启动。
-- `tcp_addr`、`ws_addr`：仅 Gate 读取，留空禁用对应入口。WS 路径固定 `/ws`，不是配置字段。
+- `tcp_addr`、`ws_addr`：仅 Gate 读取，留空禁用对应入口。WS 路径由启动调用传入，当前 Gate 使用 `/ws`。
 - `etcd.endpoints`：etcd 地址列表，用于节点发现和注册。
 
 持久化：

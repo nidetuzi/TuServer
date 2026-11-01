@@ -42,9 +42,9 @@ type wsPeer struct {
 	closeErr error
 }
 
-// Serve 在 addr 上提供 /ws。客户端用二进制消息发送与 TCP 相同的帧。
+// Serve 在 addr 的 path 上提供 WebSocket 服务。客户端用二进制消息发送与 TCP 相同的帧。
 // idle 是读空闲上限，TCP 和 WebSocket 用同一个配置。小于等于 0 时关掉库自带的 120 秒保活，避免没配超时却偷偷断开。
-func Serve(addr string, codec protocol.Codec, handle protocol.Handler, idle time.Duration) (*Server, error) {
+func Serve(addr, path string, codec protocol.Codec, handle protocol.Handler, idle time.Duration) (*Server, error) {
 	if codec == nil {
 		codec = protocol.FrameCodec{}
 	}
@@ -112,7 +112,7 @@ func Serve(addr string, codec protocol.Codec, handle protocol.Handler, idle time
 		return upgrader
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
 		upgrader := newUpgrader(r.URL.RequestURI())
 		if _, err := upgrader.Upgrade(w, r, nil); err != nil {
 			log.Warn("ws upgrade", "err", err)

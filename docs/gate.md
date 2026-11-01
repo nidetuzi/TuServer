@@ -78,7 +78,7 @@ etcd:
 ```
 
 - `listen_addr` 是 Gate 内部 Kitex 监听地址；`advertise_addr` 是注册并作为 `GateID` 发给 Logic 的回推地址。
-- `tcp_addr` 为客户端 TCP 入口；`ws_addr` 提供 `ws://127.0.0.1:8002/ws`，路径固定 `/ws`。
+- `tcp_addr` 为客户端 TCP 入口；`ws_addr` 提供 WebSocket 监听，当前 Gate 启动时将路径传为 `/ws`。
 - 某个客户端地址留空就不启动该监听。当前两个传输的 ID 会冲突，见下节；不要把同时配置两个入口视为已支持无冲突的混合会话。
 - 跨机器部署时必须修改 `advertise_addr`，示例的回环地址只适合单机。
 - 服务名应为 `Gate`；Logic 需要以 `Logic` 注册。权重配置作用于注册；Gate 本身并不通过 Gate 权重为已有连接选择返回路径。

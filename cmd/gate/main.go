@@ -74,7 +74,7 @@ func main() {
 		log.Info("tcp listen", "addr", cfg.TCPAddr, "idle", idle.String())
 	}
 	if cfg.WSAddr != "" {
-		wsSrv, err = ws.Serve(cfg.WSAddr, protocol.FrameCodec{}, g, idle)
+		wsSrv, err = ws.Serve(cfg.WSAddr, "/ws", protocol.FrameCodec{}, g, idle)
 		if err != nil {
 			log.Error("ws serve", "err", err)
 			os.Exit(1)

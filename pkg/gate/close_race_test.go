@@ -115,7 +115,7 @@ func TestCloseDuringLoginCarriesLatestPlayerID(t *testing.T) {
 	t.Run("ws", func(t *testing.T) {
 		testCloseDuringLogin(t,
 			func(h protocol.Handler) (string, func(), error) {
-				srv, err := ws.Serve("127.0.0.1:0", protocol.FrameCodec{}, h, 0)
+				srv, err := ws.Serve("127.0.0.1:0", "/ws", protocol.FrameCodec{}, h, 0)
 				if err != nil {
 					return "", nil, err
 				}
@@ -281,7 +281,7 @@ func TestOnCloseConcurrentWithOnPacket(t *testing.T) {
 	t.Run("ws", func(t *testing.T) {
 		testOnCloseConcurrentWithOnPacket(t, payload,
 			func(h protocol.Handler) (string, func(), error) {
-				srv, err := ws.Serve("127.0.0.1:0", protocol.FrameCodec{}, h, 0)
+				srv, err := ws.Serve("127.0.0.1:0", "/ws", protocol.FrameCodec{}, h, 0)
 				if err != nil {
 					return "", nil, err
 				}

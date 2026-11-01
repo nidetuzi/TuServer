@@ -119,7 +119,7 @@ func TestWebSocketHeartbeatAndIdleClose(t *testing.T) {
 	fwd := &idleFwd{}
 	g := New("127.0.0.1:9001", fwd, nil)
 	idle := 500 * time.Millisecond
-	srv, err := ws.Serve("127.0.0.1:0", protocol.FrameCodec{}, g, idle)
+	srv, err := ws.Serve("127.0.0.1:0", "/ws", protocol.FrameCodec{}, g, idle)
 	if err != nil {
 		t.Fatal(err)
 	}
