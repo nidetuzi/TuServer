@@ -13,7 +13,7 @@ func TestRotateByDaySizeAndAge(t *testing.T) {
 	day := time.Date(2026, 10, 28, 12, 0, 0, 0, time.Local)
 	cfg := Config{
 		Level:      "info",
-		Format:     "text",
+		Format:     "json",
 		Dir:        dir,
 		Name:       "gate",
 		MaxAgeDays: 7,
@@ -34,8 +34,14 @@ func TestRotateByDaySizeAndAge(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
+	if !strings.Contains(text, " INFO  [gate] session bind") {
+		t.Fatalf("日志不符合单行文本格式: %s", text)
+	}
 	if !strings.Contains(text, "server_id=1") || !strings.Contains(text, "logic=127.0.0.1:9101") {
 		t.Fatalf("日志缺少 With 字段: %s", text)
+	}
+	if strings.HasPrefix(text, "{") || strings.Contains(text, `"level"`) {
+		t.Fatalf("日志不应使用 JSON 格式: %s", text)
 	}
 
 	for i := 0; i < 20; i++ {

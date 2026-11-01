@@ -1,9 +1,12 @@
 package log
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -72,13 +75,7 @@ func Init(cfg Config) error {
 		out = io.MultiWriter(rot, os.Stdout)
 	}
 	level := parseLevel(cfg.Level)
-	var handler slog.Handler
-	opts := &slog.HandlerOptions{Level: level}
-	if cfg.Format == "json" {
-		handler = slog.NewJSONHandler(out, opts)
-	} else {
-		handler = slog.NewTextHandler(out, opts)
-	}
+	handler := newLineHandler(out, cfg.Name, level)
 	logger := slog.New(handler)
 	mu.Lock()
 	if writer != nil {
@@ -121,6 +118,78 @@ func With(args ...any) *slog.Logger {
 // 节点内部日志和框架 RPC 日志必须进同一批文件，否则排障时对不齐。
 func Handler() slog.Handler {
 	return logger().Handler()
+}
+
+type lineHandler struct {
+	out   io.Writer
+	name  string
+	level slog.Level
+	attrs []slog.Attr
+	group string
+	mu    *sync.Mutex
+}
+
+func newLineHandler(out io.Writer, name string, level slog.Level) slog.Handler {
+	return &lineHandler{out: out, name: name, level: level, mu: &sync.Mutex{}}
+}
+
+func (h *lineHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= h.level
+}
+
+func (h *lineHandler) Handle(_ context.Context, record slog.Record) error {
+	var fields []string
+	for _, attr := range h.attrs {
+		fields = appendAttr(fields, h.group, attr)
+	}
+	record.Attrs(func(attr slog.Attr) bool {
+		fields = appendAttr(fields, h.group, attr)
+		return true
+	})
+	line := fmt.Sprintf("%s %-5s [%s] %s", record.Time.Format("2006-01-02 15:04:05"), strings.ToUpper(record.Level.String()), h.name, record.Message)
+	if len(fields) > 0 {
+		line += " " + strings.Join(fields, " ")
+	}
+	line += "\n"
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, err := io.WriteString(h.out, line)
+	return err
+}
+
+func appendAttr(fields []string, group string, attr slog.Attr) []string {
+	attr.Value = attr.Value.Resolve()
+	key := attr.Key
+	if group != "" {
+		key = group + "." + key
+	}
+	if attr.Value.Kind() == slog.KindGroup {
+		for _, nested := range attr.Value.Group() {
+			fields = appendAttr(fields, key, nested)
+		}
+		return fields
+	}
+	value := fmt.Sprint(attr.Value.Any())
+	if strings.ContainsAny(value, " \t\n\"=") {
+		value = fmt.Sprintf("%q", value)
+	}
+	return append(fields, key+"="+value)
+}
+
+func (h *lineHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	clone := *h
+	clone.attrs = append(append([]slog.Attr(nil), h.attrs...), attrs...)
+	return &clone
+}
+
+func (h *lineHandler) WithGroup(name string) slog.Handler {
+	clone := *h
+	if h.group == "" {
+		clone.group = name
+	} else {
+		clone.group = h.group + "." + name
+	}
+	return &clone
 }
 
 func logger() *slog.Logger {
