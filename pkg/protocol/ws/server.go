@@ -54,62 +54,66 @@ func Serve(addr string, codec protocol.Codec, handle protocol.Handler, idle time
 		idle:   idle,
 		peers:  make(map[*websocket.Conn]*wsPeer),
 	}
-	upgrader := websocket.NewUpgrader()
-	// KeepaliveTime 会在收到每条消息后重设读截止时间，半开连接到期由 nbio 关闭。
-	upgrader.KeepaliveTime = idle
-	upgrader.OnOpen(func(c *websocket.Conn) {
-		p := &wsPeer{
-			id:   strconv.FormatUint(s.seq.Add(1), 10),
-			conn: c,
-			code: s.codec,
-			q:    make(chan protocol.Packet, 128),
-		}
-		// 先发布，再交给读回调。字段写入在这次解锁之前，OnMessage/OnClose 加锁取出后才能读。
-		s.peersMu.Lock()
-		s.peers[c] = p
-		s.peersMu.Unlock()
-		c.SetSession(p)
-		go p.loop(s.handle)
-		if s.handle != nil {
-			s.handle.OnOpen(p)
-		}
-	})
-	upgrader.OnMessage(func(c *websocket.Conn, _ websocket.MessageType, data []byte) {
-		s.peersMu.Lock()
-		p := s.peers[c]
-		s.peersMu.Unlock()
-		if p == nil {
-			return
-		}
-		raw := append([]byte(nil), data...)
-		pkt, _, err := s.codec.Decode(raw)
-		if err != nil {
-			log.Warn("ws frame", "err", err, "session_id", p.id)
-			_ = c.Close()
-			return
-		}
-		closed, full := p.enqueue(pkt)
-		if closed {
-			return
-		}
-		if full {
-			log.Warn("ws queue full", "session_id", p.id)
-			_ = c.Close()
-		}
-	})
-	upgrader.OnClose(func(c *websocket.Conn, err error) {
-		s.peersMu.Lock()
-		p := s.peers[c]
-		delete(s.peers, c)
-		s.peersMu.Unlock()
-		if p == nil {
-			return
-		}
-		// 这里只关队列。OnClose 放到 loop 退出之后，才能读到 OnPacket 刚写回的 playerID。
-		p.shutdown(err)
-	})
+	newUpgrader := func(requestURI string) *websocket.Upgrader {
+		upgrader := websocket.NewUpgrader()
+		// KeepaliveTime 会在收到每条消息后重设读截止时间，半开连接到期由 nbio 关闭。
+		upgrader.KeepaliveTime = idle
+		upgrader.OnOpen(func(c *websocket.Conn) {
+			p := &wsPeer{
+				id:   strconv.FormatUint(s.seq.Add(1), 10),
+				conn: c,
+				code: s.codec,
+				q:    make(chan protocol.Packet, 128),
+			}
+			// 先发布，再交给读回调。字段写入在这次解锁之前，OnMessage/OnClose 加锁取出后才能读。
+			s.peersMu.Lock()
+			s.peers[c] = p
+			s.peersMu.Unlock()
+			c.SetSession(p)
+			ready := make(chan struct{})
+			go p.loop(s.handle, ready)
+			protocol.NotifyOpen(s.handle, p, requestURI)
+			close(ready)
+		})
+		upgrader.OnMessage(func(c *websocket.Conn, _ websocket.MessageType, data []byte) {
+			s.peersMu.Lock()
+			p := s.peers[c]
+			s.peersMu.Unlock()
+			if p == nil {
+				return
+			}
+			raw := append([]byte(nil), data...)
+			pkt, _, err := s.codec.Decode(raw)
+			if err != nil {
+				log.Warn("ws frame", "err", err, "session_id", p.id)
+				_ = c.Close()
+				return
+			}
+			closed, full := p.enqueue(pkt)
+			if closed {
+				return
+			}
+			if full {
+				log.Warn("ws queue full", "session_id", p.id)
+				_ = c.Close()
+			}
+		})
+		upgrader.OnClose(func(c *websocket.Conn, err error) {
+			s.peersMu.Lock()
+			p := s.peers[c]
+			delete(s.peers, c)
+			s.peersMu.Unlock()
+			if p == nil {
+				return
+			}
+			// 这里只关队列。OnClose 放到 loop 退出之后，才能读到 OnPacket 刚写回的 playerID。
+			p.shutdown(err)
+		})
+		return upgrader
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		upgrader := newUpgrader(r.URL.RequestURI())
 		if _, err := upgrader.Upgrade(w, r, nil); err != nil {
 			log.Warn("ws upgrade", "err", err)
 		}
@@ -193,7 +197,8 @@ func (p *wsPeer) shutdown(err error) {
 	close(p.q)
 }
 
-func (p *wsPeer) loop(h protocol.Handler) {
+func (p *wsPeer) loop(h protocol.Handler, ready <-chan struct{}) {
+	<-ready
 	for pkt := range p.q {
 		p.mu.Lock()
 		closed := p.closed

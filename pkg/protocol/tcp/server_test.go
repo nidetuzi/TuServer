@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,7 +15,7 @@ type testHandler struct {
 	closes  atomic.Int32
 }
 
-func (h *testHandler) OnOpen(protocol.Peer)                    {}
+func (h *testHandler) OnOpen(protocol.Peer, string)            {}
 func (h *testHandler) OnPacket(protocol.Peer, protocol.Packet) { h.packets.Add(1) }
 func (h *testHandler) OnClose(protocol.Peer, error)            { h.closes.Add(1) }
 
@@ -23,7 +24,9 @@ func TestPeerShutdownWaitsForInFlightPacket(t *testing.T) {
 	p := &tcpPeer{q: make(chan protocol.Packet, 2)}
 	p.q <- protocol.Packet{CmdID: 1}
 	p.q <- protocol.Packet{CmdID: 2}
-	go p.loop(h)
+	ready := make(chan struct{})
+	close(ready)
+	go p.loop(h, ready)
 	<-h.started
 	p.shutdown(nil)
 	select {
@@ -45,7 +48,7 @@ type orderedHandler struct {
 	closed  chan struct{}
 }
 
-func (h *orderedHandler) OnOpen(protocol.Peer) {}
+func (h *orderedHandler) OnOpen(protocol.Peer, string) {}
 func (h *orderedHandler) OnPacket(protocol.Peer, protocol.Packet) {
 	h.packets.Add(1)
 	close(h.started)
@@ -59,8 +62,55 @@ func TestPeerDropsQueuedPacketsAfterShutdown(t *testing.T) {
 	p.q <- protocol.Packet{CmdID: 1}
 	p.q <- protocol.Packet{CmdID: 2}
 	p.shutdown(nil)
-	p.loop(h)
+	ready := make(chan struct{})
+	close(ready)
+	p.loop(h, ready)
 	if h.packets.Load() != 0 || h.closes.Load() != 1 {
 		t.Fatalf("关闭后应丢弃排队帧并只回调一次: packets=%d closes=%d", h.packets.Load(), h.closes.Load())
 	}
 }
+
+func TestOpenReceivesEmptyURIBeforePackets(t *testing.T) {
+	h := &openOrderHandler{opened: make(chan string, 1), packets: make(chan struct{}, 1)}
+	s, err := Serve("127.0.0.1:0", protocol.FrameCodec{}, h, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	conn, err := net.Dial("tcp", s.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	frame, err := (protocol.FrameCodec{}).Encode(protocol.Packet{CmdID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case uri := <-h.opened:
+		if uri != "" {
+			t.Fatalf("TCP OnOpen URI 应为空: %q", uri)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("未调用 OnOpen")
+	}
+	select {
+	case <-h.packets:
+	case <-time.After(time.Second):
+		t.Fatal("OnOpen 返回后未处理业务消息")
+	}
+}
+
+type openOrderHandler struct {
+	opened  chan string
+	packets chan struct{}
+}
+
+func (h *openOrderHandler) OnOpen(_ protocol.Peer, requestURI string) {
+	h.opened <- requestURI
+}
+func (h *openOrderHandler) OnPacket(protocol.Peer, protocol.Packet) { h.packets <- struct{}{} }
+func (h *openOrderHandler) OnClose(protocol.Peer, error)            {}

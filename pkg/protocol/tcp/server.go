@@ -109,10 +109,10 @@ func (s *Server) onOpen(c *nbio.Conn) {
 	s.peersMu.Unlock()
 	c.SetSession(p)
 	s.armRead(c)
-	go p.loop(s.handle)
-	if s.handle != nil {
-		s.handle.OnOpen(p)
-	}
+	ready := make(chan struct{})
+	go p.loop(s.handle, ready)
+	protocol.NotifyOpen(s.handle, p, "")
+	close(ready)
 }
 
 func (s *Server) lookup(c *nbio.Conn) *tcpPeer {
@@ -206,7 +206,8 @@ func (p *tcpPeer) shutdown(err error) {
 	close(p.q)
 }
 
-func (p *tcpPeer) loop(h protocol.Handler) {
+func (p *tcpPeer) loop(h protocol.Handler, ready <-chan struct{}) {
+	<-ready
 	for pkt := range p.q {
 		p.mu.Lock()
 		closed := p.closed
