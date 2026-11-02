@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"tuserv/pkg/entity"
+	"tuserv/pkg/log"
 )
 
 // Policy 决定什么时候把实体移出内存。两项都是 0 时不淘汰。
@@ -129,6 +130,7 @@ func (c *Cache) Evict(ctx context.Context) error {
 	}
 	c.flushMu.Lock()
 	defer c.flushMu.Unlock()
+	evictStart := time.Now()
 	now := c.now()
 	open, idleCount, need := c.plan(now)
 	var errs []error
@@ -150,6 +152,12 @@ func (c *Cache) Evict(ctx context.Context) error {
 		if ok {
 			removed++
 		}
+	}
+	if removed > 0 {
+		log.Debug("cache eviction completed", "removed", removed, "candidates", len(open), "elapsed", time.Since(evictStart))
+	}
+	if len(errs) > 0 {
+		log.Warn("cache eviction completed with errors", "errors", len(errs), "candidates", len(open), "removed", removed)
 	}
 	return errors.Join(errs...)
 }

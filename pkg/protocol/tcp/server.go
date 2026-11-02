@@ -109,6 +109,7 @@ func (s *Server) onOpen(c *nbio.Conn) {
 	s.peersMu.Unlock()
 	c.SetSession(p)
 	s.armRead(c)
+	log.Info("tcp client connected", "session_id", p.id, "remote_addr", c.RemoteAddr().String())
 	ready := make(chan struct{})
 	go p.loop(s.handle, ready)
 	protocol.NotifyOpen(s.handle, p, "")
@@ -157,6 +158,11 @@ func (s *Server) onClose(c *nbio.Conn, err error) {
 	s.peersMu.Unlock()
 	if p == nil {
 		return
+	}
+	if err != nil {
+		log.Info("tcp client disconnected", "session_id", p.id, "remote_addr", c.RemoteAddr().String(), "err", err)
+	} else {
+		log.Info("tcp client disconnected", "session_id", p.id, "remote_addr", c.RemoteAddr().String())
 	}
 	// 这里只关队列。OnClose 放到 loop 退出之后，才能读到 OnPacket 刚写回的 playerID。
 	p.shutdown(err)

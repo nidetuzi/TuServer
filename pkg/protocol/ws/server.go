@@ -70,6 +70,7 @@ func Serve(addr, path string, codec protocol.Codec, handle protocol.Handler, idl
 			s.peers[c] = p
 			s.peersMu.Unlock()
 			c.SetSession(p)
+			log.Info("ws client connected", "session_id", p.id, "remote_addr", c.RemoteAddr().String(), "request_uri", requestURI)
 			ready := make(chan struct{})
 			go p.loop(s.handle, ready)
 			protocol.NotifyOpen(s.handle, p, requestURI)
@@ -105,6 +106,11 @@ func Serve(addr, path string, codec protocol.Codec, handle protocol.Handler, idl
 			s.peersMu.Unlock()
 			if p == nil {
 				return
+			}
+			if err != nil {
+				log.Info("ws client disconnected", "session_id", p.id, "remote_addr", c.RemoteAddr().String(), "err", err)
+			} else {
+				log.Info("ws client disconnected", "session_id", p.id, "remote_addr", c.RemoteAddr().String())
 			}
 			// 这里只关队列。OnClose 放到 loop 退出之后，才能读到 OnPacket 刚写回的 playerID。
 			p.shutdown(err)

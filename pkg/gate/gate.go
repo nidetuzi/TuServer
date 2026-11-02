@@ -60,6 +60,7 @@ func (g *Gate) OnOpen(p protocol.Peer) {
 	g.mu.Lock()
 	g.sessions[p.ID()] = &session{peer: p}
 	g.mu.Unlock()
+	log.Info("client session opened", "gate", g.id, "session_id", p.ID())
 }
 
 // OnPacket 在会话协程里运行。第一次按权重选节点，失败时清掉地址再选一次。
@@ -139,14 +140,22 @@ func (g *Gate) OnPacket(p protocol.Peer, pkt protocol.Packet) {
 
 // OnClose 通知逻辑节点丢掉这条会话，避免区服广播继续推给已断开的连接。
 // 传输层会等当前 OnPacket 返回后再调用，因此这里的 playerID 和 logicAddr 已经是最后一次回包写回的值。
-func (g *Gate) OnClose(p protocol.Peer, _ error) {
+func (g *Gate) OnClose(p protocol.Peer, closeErr error) {
 	s := g.drop(p.ID())
-	if s == nil || s.logicAddr == "" {
+	if s == nil {
+		return
+	}
+	if closeErr != nil {
+		log.Info("client session closed", "gate", g.id, "session_id", p.ID(), "server_id", s.serverID, "player_id", s.playerID, "logic", s.logicAddr, "err", closeErr)
+	} else {
+		log.Info("client session closed", "gate", g.id, "session_id", p.ID(), "server_id", s.serverID, "player_id", s.playerID, "logic", s.logicAddr)
+	}
+	if s.logicAddr == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
 	defer cancel()
-	_, _ = g.fwd.Dispatch(ctx, s.logicAddr, logic.Request{
+	_, err := g.fwd.Dispatch(ctx, s.logicAddr, logic.Request{
 		GateID:    g.id,
 		SessionID: p.ID(),
 		ServerID:  s.serverID,
@@ -154,6 +163,9 @@ func (g *Gate) OnClose(p protocol.Peer, _ error) {
 		CmdID:     logic.CmdDisconnect,
 		Internal:  true,
 	})
+	if err != nil {
+		log.Warn("notify logic disconnect", "err", err, "session_id", p.ID(), "player_id", s.playerID, "logic", s.logicAddr)
+	}
 }
 
 // Push 把逻辑节点的推送写回指定会话。踢线帧不写给客户端，直接关掉这条连接。

@@ -90,9 +90,16 @@ func (c *Cache) Get(ctx context.Context, serverID int32, collection, key string,
 		return nil, store.ErrNotFound
 	}
 	e := factory()
+	loadStart := time.Now()
 	if err := c.load(ctx, serverID, collection, key, e); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			log.Debug("cache miss", "server_id", serverID, "collection", collection, "key", key, "elapsed", time.Since(loadStart))
+		} else {
+			log.Warn("cache load failed", "server_id", serverID, "collection", collection, "key", key, "elapsed", time.Since(loadStart), "err", err)
+		}
 		return nil, err
 	}
+	log.Debug("cache loaded", "server_id", serverID, "collection", collection, "key", key, "elapsed", time.Since(loadStart))
 	if n, ok := e.(interface{ NoteLoaded() }); ok {
 		n.NoteLoaded()
 	}
@@ -203,6 +210,7 @@ func (c *Cache) Flush(ctx context.Context) error {
 	}
 	c.flushMu.Lock()
 	defer c.flushMu.Unlock()
+	flushStart := time.Now()
 	// 先只拷贝指针。Dirty 要拿实体锁，不能在缓存锁里调用，否则和淘汰的加锁顺序相反。
 	c.mu.Lock()
 	seen := make(map[entity.Entity]struct{})
@@ -235,6 +243,13 @@ func (c *Cache) Flush(ctx context.Context) error {
 		}
 		if err := c.saveOne(ctx, e); err != nil {
 			errs = append(errs, fmt.Errorf("cache: save %s/%s: %w", e.Collection(), e.CacheKey(), err))
+		}
+	}
+	if len(dirty) > 0 {
+		if len(errs) > 0 {
+			log.Warn("cache flush completed with errors", "entities", len(dirty), "errors", len(errs), "elapsed", time.Since(flushStart))
+		} else {
+			log.Debug("cache flush completed", "entities", len(dirty), "elapsed", time.Since(flushStart))
 		}
 	}
 	return errors.Join(errs...)
@@ -277,6 +292,7 @@ func (c *Cache) saveOne(ctx context.Context, e entity.Entity) error {
 		return nil
 	}
 	if err != nil {
+		log.Warn("cache save failed", "server_id", e.ServerID(), "collection", e.Collection(), "key", e.CacheKey(), "rev", rev, "fence", fence, "err", err)
 		return err
 	}
 	e.EndSave(gen)

@@ -590,8 +590,12 @@ func (a *App) bindOnline(ctx context.Context, req Request, playerID int64, term 
 		fn()
 	}
 	if kickOld {
+		log.Info("session replaced", "old_session_id", prev.ID, "session_id", req.SessionID, "server_id", req.ServerID, "player_id", playerID, "old_gate", prev.GateAddr, "gate", req.GateID)
 		a.Actors.Retire("session/" + prev.ID)
 		a.kick(ctx, prev.GateAddr, prev.ID)
+	}
+	if changed {
+		log.Info("player online", "session_id", req.SessionID, "server_id", req.ServerID, "player_id", playerID, "gate", req.GateID, "term", term)
 	}
 	if changed && a.Hooks.OnOnline != nil {
 		a.Hooks.OnOnline(sess)
@@ -657,6 +661,7 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 			if unpin != nil {
 				unpin()
 			}
+			log.Info("player offline", "session_id", req.SessionID, "server_id", req.ServerID, "player_id", req.PlayerID, "gate", req.GateID, "term", b.Term)
 		})
 	})
 	if runErr != nil {
