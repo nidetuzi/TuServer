@@ -6,6 +6,7 @@ import (
 )
 
 // BagService 修改角色背包。背包嵌在角色上，因此不再单独落一份文档。
+// 简单扣减也可直接写在 handler；保留 service 供测试与复用调用。
 type BagService struct{}
 
 // NewBagService 创建背包服务。
@@ -16,15 +17,11 @@ func (s *BagService) Use(ctx *handler.Context, itemID, count int32) (int32, erro
 	if itemID <= 0 || count <= 0 {
 		return 0, ErrBadArg
 	}
-	v, err := ctx.GetPlayer()
-	if err != nil {
-		return 0, err
-	}
-	p := v.(*entity.Player)
-	left, ok := p.TryUse(itemID, count)
-	if !ok {
-		return 0, ErrNotEnough
-	}
-	p.MarkDirty()
-	return left, nil
+	return handler.Mutate(ctx, func(p *entity.Player) (int32, error) {
+		left, ok := p.TryUse(itemID, count)
+		if !ok {
+			return 0, ErrNotEnough
+		}
+		return left, nil
+	})
 }

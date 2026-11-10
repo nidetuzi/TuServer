@@ -5,10 +5,11 @@
 ## 职责与源码入口
 
 - [owner.go](../pkg/owner/owner.go)：`EntityKey`、`Runtime`、类型化 `Register` / `Call`、JSON DTO、单跳校验、重入检查与错误码。
+- [shortpath.go](../pkg/owner/shortpath.go)：`OnCreate` / `OnMutate` 短路径，减少主人侧 Get/fence/快照样板。
 - [doc.go](../pkg/owner/doc.go)：包级约束。
 - [owner_test.go](../pkg/owner/owner_test.go)：运行时单测。
 - [cmd/logic/owner.go](../cmd/logic/owner.go)：把服务发现、实体选主和 Kitex Dispatch 注入运行时。
-- [cmd/logic/main.go](../cmd/logic/main.go)：共享 `app.Actors`，注册公会操作，设置 `app.Owners`。
+- [cmd/logic/main.go](../cmd/logic/main.go) + [demo Module](../example/demo/module.go)：进程装配后由模块 `Wire` 注册公会操作并设置 `app.Owners`。
 - [logic/app.go](../pkg/logic/app.go)、[Logic owner 测试](../pkg/logic/owner_test.go)：`CmdID == 0` 的内部入口与会话邮箱隔离。
 - [公会 service](../example/demo/service/guild.go)、[公会实体](../example/demo/entity/guild.go)、[公会测试](../example/demo/service/guild_test.go)：真实共享实体用法。
 - 配套：[actor](actor.md)、[cluster](cluster.md)、[entity](entity.md)、[cache](cache.md)、[gate](gate.md)。
@@ -33,6 +34,7 @@
 - `Resolver` 为 `func(context.Context, EntityKey) (string, error)`；返回地址必须可与 `self` 直接字符串比较。
 - `Transport` 为 `func(context.Context, string, []byte) ([]byte, error)`；接收目标地址和编码请求，返回编码响应。
 - `Register[Req, Resp](r, name, fn) error`：处理函数类型是 `func(context.Context, EntityKey, Req) (Resp, error)`。泛型函数是包级函数，不是 Runtime 方法。
+- `OnCreate` / `OnMutate`：在 `Register` 之上封装创建 keep 与加载改写；`OnMutate` 是否打脏由 mutate 自行决定（避免无变更脏标记）。
 - `Call[Resp](ctx, r, key, operation, args) (Resp, error)`：调用方指定响应类型；参数类型由 `args any` 接收，并不是编译期强类型的客户端桩。
 - `(*Runtime).Handle(ctx, body) ([]byte, error)`：远端入站入口，必须在 actor 外调用，不应从会话或实体邮箱里同步调用它。
 - `NewError(code, message) error`、`CodeError`：提供可跨节点按码匹配的业务错误。

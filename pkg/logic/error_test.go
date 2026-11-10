@@ -13,6 +13,7 @@ import (
 	"tuserv/pkg/owner"
 	"tuserv/pkg/protocol"
 	"tuserv/pkg/router"
+	routepb "tuserv/pkg/router/protobuf"
 	"tuserv/pkg/store"
 )
 
@@ -63,7 +64,7 @@ func TestBusinessErrorBecomesFrame(t *testing.T) {
 		t.Fatal("失败请求不应登记新会话")
 	}
 
-	router.Register(r, int32(3), func(*handler.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+	router.Register(r, int32(3), routepb.Body(), func(*handler.Context, *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
 		return &wrapperspb.StringValue{Value: "x"}, nil
 	})
 	resp, err = app.Handle(context.Background(), Request{SessionID: "s", ServerID: 1, PlayerID: playerID, CmdID: 3, Body: []byte{0xff}, GateID: "g"})

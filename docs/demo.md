@@ -168,18 +168,15 @@ handler/service 返回错误 → `router.Register` 不编码响应 → `App.Hand
 
 ## 7. 扩展玩法的步骤
 
-1. **协议源**：修改 `example/demo/proto/game.proto`，从仓库根目录运行生成命令（本文仅提供命令，没有执行）：
+框架不绑定某种客户端 IDL。Demo 当前用 protobuf 仅作示例；换游戏时可替换帧 `protocol.Codec` 与 `router.BodyCodec`，逻辑进程通过 `demo.Module`（或自有 `logic.Module`）的 `Wire` 挂载。
 
-```text
-protoc --go_out=. --go_opt=module=tuserv example/demo/proto/game.proto
-```
-
-2. **生成边界**：只让工具更新 `example/demo/gen`，禁止手改 `game.pb.go`；节点接口需要变动时另改 `idl/node.proto` 并运行 Kitex 生成，禁止手改 `kitex_gen`。不要为每个玩法协议新增 Kitex 方法。
-3. **实体**：新增存档字段放 entity，必要时同步更新快照文档和 `Persist`；不将生成 protobuf 当存档。玩法方法与业务序列化仍围绕 actor，不引入业务锁来替代邮箱。
-4. **服务**：通过 `ctx.GetPlayer()` 或缓存 Get 读实体，修改后 `MarkDirty`。复用服务处理校验，不直接在 handler 拼查询、Save/Flush。新增共享实体使用 `owner.Key`、启动阶段的 `owner.Register` 及调用端 `owner.Call[DTO]`，在主人操作里 Get/修改/打脏并返回快照，不再自行实现专用转发器或暴露实体指针。
-5. **事件**：用具体值类型注册同步监听，与发布类型保持一致；监听者在当前 actor 可改该角色并打脏，不启动协程继续改实体。跨节点通知捕获不可变载荷后异步发出。
-6. **Handler 与注册**：handler 只负责校验、服务调用与组包，新增命令集中进 `cmd.go` 和 `Register`；依赖通过 `Deps` 注入，入口装配不得留缺失服务。
-7. **测试**：先测实体规则/服务错误，再经 App.Handle 验证协议、身份及事件，最后对需要的分布式边界补集成测试。所有新增 Go 示例/代码注释使用中文。
+1. **协议（按游戏自选）**：Demo 若继续用 protobuf，修改 `example/demo/proto/game.proto` 后生成到 `example/demo/gen`（禁止手改生成物）。节点 Kitex IDL 变动时另改 `idl/node.proto`。不要为每个玩法协议新增 Kitex 方法。
+2. **实体**：嵌入 `entity.Identity`，`Persist` 调用 `entity.PersistBSON`；不维护平行 Doc 类型，不把网络消息当存档。
+3. **改玩家**：简单规则可直接写在 handler，用 `handler.Mutate`/`Player`；复杂/跨实体/事件/owner 编排放 service。不要手写 `GetPlayer` 断言 + 成功路径漏打脏。
+4. **共享实体**：启动用 `owner.OnCreate`/`OnMutate` 注册主人操作，调用侧 `owner.Call[DTO]`；业务编号查找用 `cache.GetByBizID`。跨实体回写（如玩家 GuildID）留在调用侧。
+5. **事件**：具体值类型同步监听；监听者在当前 actor 可改该角色并打脏。
+6. **注册与装配**：命令进 `cmd.go` 与 `Register`（注入 `BodyCodec`）；生产入口用 `Module.Wire`，不要改 `cmd/logic/main.go` 去断言玩法实体类型。
+7. **测试**：先测实体/服务，再经 `App.Handle`，必要时补 owner 边界。注释用中文。
 
 ## 8. 已有测试及覆盖边界
 

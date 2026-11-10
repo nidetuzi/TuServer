@@ -6,11 +6,13 @@ alwaysApply: true
 # 架构
 
 - 模块是 `tuserv`。框架在 `pkg`，进程在 `cmd`，玩法 demo 在 `example/demo`。单测和被测文件放在一起。
-- 请求路径是 handler、service、entity。handler 只做参数校验和简单逻辑，改数据和发事件放在 service。
-- 业务只调用缓存的 `Get`。未命中时由框架内部加载 Mongo。不要在业务包里调用 `Load`。
+- 请求路径是 handler、service、entity。玩法通过 `logic.Module.Wire` 挂到进程，不要在 `cmd/logic` 散落具体实体类型断言。
+- **Handler / Service 简繁分流**：简单、单实体、无复用的规则可直接写在 handler（可用 `handler.Mutate`/`Player`）；复杂、跨实体、要复用、含 owner/事件编排的逻辑放 service；handler 做参数门槛、调 service、填响应。换客户端协议时只换帧/`BodyCodec` 与 handler 的 req/resp 映射，service 不依赖具体 IDL。
+- 改当前会话玩家优先用 `handler.Mutate`（成功才 `MarkDirty`）；只读写 `handler.Player[T]`。共享实体主人操作优先用 `owner.OnMutate`/`OnCreate`，跨实体回写仍在调用侧。
+- 业务只调用缓存的 `Get`/`GetByBizID`。未命中时由框架内部加载 Mongo。不要在业务包里调用 `Load`。
 - 修改实体只打脏标记。落库由节点定时刷盘，退出前再刷一次。
 - 角色属于会话所在节点。公会按实体键转到主人节点，非主人用 Kitex 转发。actor 处理中禁止同步 RPC 回自己。
-- 客户端协议自研，帧是 `uint32 长度 | int32 cmdId | int32 serverId | protobuf`。节点之间只用 Kitex。游戏协议号不要写成 Kitex 方法。
+- 客户端协议可替换：Gate 注入帧 `protocol.Codec`；Logic 路由注入 `router.BodyCodec`（protobuf 只是可选适配）。框架只认 `CmdID + []byte`。节点之间只用 Kitex。游戏协议号不要写成 Kitex 方法。
 - 新会话按权重选一次 Logic 并钉住地址。区服不绑定某一台 Logic。
 - 日志只用 `tuserv/pkg/log`。不要直接使用标准库 `log` 或 `log/slog`。配置只用 `gopkg.in/yaml.v3`。
 - `kitex_gen` 和 `example/demo/gen` 由工具生成，不要手改。
@@ -25,6 +27,8 @@ alwaysApply: true
 - 提交前检查新增或复用的辅助函数，确认职责与所在文件一致。
 
 ```go
-// 业务读实体只走 Get。没有则框架内部加载。
-p, err := ctx.GetPlayer()
+// 改玩家状态：闭包里只写规则，成功由 Mutate 打脏。
+left, err := handler.Mutate(ctx, func(p *entity.Player) (int32, error) {
+	return p.TryUse(itemID, count)
+})
 ```

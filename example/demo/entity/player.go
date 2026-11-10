@@ -9,12 +9,11 @@ import (
 // RewardItemID 是升级事件发给背包的演示道具。
 const RewardItemID int32 = 9001
 
-// Player 是会话本地实体。脏标记嵌在 State 里，业务只调用 MarkDirty。
+// Player 是会话本地实体。脏标记嵌在 Identity 里，业务只调用 MarkDirty。
 type Player struct {
-	entity.State `bson:"-"`
-	OID          primitive.ObjectID `bson:"_id"`
-	PlayerID     int64              `bson:"id"`
-	Server       int32              `bson:"server_id"`
+	entity.Identity
+	PlayerID int64 `bson:"id"`
+	Server   int32 `bson:"server_id"`
 	// Username 保存渠道账号身份，独立于可展示和修改的角色昵称。
 	Username string          `bson:"username"`
 	Name     string          `bson:"name"`
@@ -22,8 +21,6 @@ type Player struct {
 	Exp      int32           `bson:"exp"`
 	Bag      map[int32]int32 `bson:"bag"`
 	GuildID  int64           `bson:"guild_id"`
-	Rev      uint64          `bson:"rev,omitempty"`
-	Fence    uint64          `bson:"fence,omitempty"`
 	// LastOfflineAt 保存服务器确认离线的 Unix 秒，不把进程崩溃伪装成正常断线。
 	LastOfflineAt int64 `bson:"last_offline_at,omitempty"`
 	// LastLoginAt 保存最近一次成功上线的 Unix 秒，在线检查不修改登录时间。
@@ -47,16 +44,13 @@ type Snapshot struct {
 // NewPlayer 创建 1 级角色。_id 在插入前生成，这样还没刷盘也能放进缓存。业务编号由存储的计数器另行分配。
 func NewPlayer(serverID int32, name string) *Player {
 	return &Player{
-		OID:    primitive.NewObjectID(),
-		Server: serverID,
-		Name:   name,
-		Level:  1,
-		Bag:    map[int32]int32{},
+		Identity: entity.Identity{OID: primitive.NewObjectID()},
+		Server:   serverID,
+		Name:     name,
+		Level:    1,
+		Bag:      map[int32]int32{},
 	}
 }
-
-// CacheKey 使用 ObjectID。自增号会改查询条件，不能拿来当 Mongo 的 _id。
-func (p *Player) CacheKey() string { return p.OID.Hex() }
 
 // ServerID 决定落在哪个区服库。
 func (p *Player) ServerID() int32 { return p.Server }
@@ -69,27 +63,6 @@ func (p *Player) RouteKey() string { return p.OID.Hex() }
 
 // Placement 声明角色留在会话节点。
 func (p *Player) Placement() entity.Placement { return entity.PlacementLocal }
-
-// InitRev 标记这份新建角色已经和插入时的代数对齐。
-func (p *Player) InitRev(rev uint64) {
-	p.State.InitRev(rev)
-	p.Rev = rev
-}
-
-// NoteLoaded 在缓存从库里装入之后恢复代数，条件写才不会用更小的版本覆盖。
-func (p *Player) NoteLoaded() { p.Restore(p.Rev) }
-
-// SetFence 记下当前持有的写入任期。更小的任期不能把刚抢到的任期盖掉。
-func (p *Player) SetFence(term uint64) {
-	if term == 0 {
-		return
-	}
-	p.Lock()
-	if term > p.Fence {
-		p.Fence = term
-	}
-	p.Unlock()
-}
 
 // Snapshot 在锁内拷贝回包需要的字段。
 func (p *Player) Snapshot() Snapshot {
@@ -170,22 +143,9 @@ func (p *Player) BagAdd(itemID, delta int32) int32 {
 	return n
 }
 
-// Persist 在一把锁里拷贝落库字段，避免刷盘读到写一半的背包。
+// Persist 深拷贝落库字段，避免刷盘读到写一半的背包。
 func (p *Player) Persist() (uint64, any) {
-	doc := playerDoc{}
-	gen := p.Capture(func() {
-		bag := make(map[int32]int32, len(p.Bag))
-		for k, v := range p.Bag {
-			bag[k] = v
-		}
-		doc = playerDoc{
-			OID: p.OID, PlayerID: p.PlayerID, Server: p.Server, Username: p.Username, Name: p.Name,
-			Level: p.Level, Exp: p.Exp, Bag: bag, GuildID: p.GuildID, Fence: p.Fence,
-			LastOfflineAt: p.LastOfflineAt, LastLoginAt: p.LastLoginAt,
-		}
-	})
-	doc.Rev = gen
-	return gen, doc
+	return entity.PersistBSON(&p.State, p)
 }
 
 // NeedExp 是升到下一级所需经验。等级越高越贵，演示用线性公式即可。
@@ -195,22 +155,3 @@ func NeedExp(level int32) int32 {
 	}
 	return 100 * level
 }
-
-type playerDoc struct {
-	OID           primitive.ObjectID `bson:"_id"`
-	PlayerID      int64              `bson:"id"`
-	Server        int32              `bson:"server_id"`
-	Username      string             `bson:"username"`
-	Name          string             `bson:"name"`
-	Level         int32              `bson:"level"`
-	Exp           int32              `bson:"exp"`
-	Bag           map[int32]int32    `bson:"bag"`
-	GuildID       int64              `bson:"guild_id"`
-	Rev           uint64             `bson:"rev,omitempty"`
-	Fence         uint64             `bson:"fence,omitempty"`
-	LastOfflineAt int64              `bson:"last_offline_at,omitempty"`
-	LastLoginAt   int64              `bson:"last_login_at,omitempty"`
-}
-
-// DocVersion 提供条件写使用的代数和任期。
-func (d playerDoc) DocVersion() (uint64, uint64) { return d.Rev, d.Fence }

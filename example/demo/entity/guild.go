@@ -9,28 +9,22 @@ import (
 
 // Guild 按实体键路由到唯一节点。成员列表不能在每个逻辑节点各缓存一份。
 type Guild struct {
-	entity.State `bson:"-"`
-	OID          primitive.ObjectID `bson:"_id"`
-	GuildID      int64              `bson:"id"`
-	Server       int32              `bson:"server_id"`
-	Name         string             `bson:"name"`
-	Members      []int64            `bson:"members"`
-	Rev          uint64             `bson:"rev,omitempty"`
-	Fence        uint64             `bson:"fence,omitempty"`
+	entity.Identity
+	GuildID int64   `bson:"id"`
+	Server  int32   `bson:"server_id"`
+	Name    string  `bson:"name"`
+	Members []int64 `bson:"members"`
 }
 
 // NewGuild 创建只有创建者一名成员的公会。_id 当场生成，自增号由调用方在计数器返回后写入。
-func NewGuild(serverID int32, name string, owner int64) *Guild {
+func NewGuild(serverID int32, name string, ownerID int64) *Guild {
 	return &Guild{
-		OID:     primitive.NewObjectID(),
-		Server:  serverID,
-		Name:    name,
-		Members: []int64{owner},
+		Identity: entity.Identity{OID: primitive.NewObjectID()},
+		Server:   serverID,
+		Name:     name,
+		Members:  []int64{ownerID},
 	}
 }
-
-// CacheKey 使用 ObjectID，和角色一样，避免把自增号写进 _id。
-func (g *Guild) CacheKey() string { return g.OID.Hex() }
 
 // ServerID 决定公会落在哪个区服库。
 func (g *Guild) ServerID() int32 { return g.Server }
@@ -45,21 +39,6 @@ func (g *Guild) RouteKey() string {
 
 // Placement 声明公会必须按键找主人节点。
 func (g *Guild) Placement() entity.Placement { return entity.PlacementRouted }
-
-// NoteLoaded 用库里的代数恢复内存版本。
-func (g *Guild) NoteLoaded() { g.Restore(g.Rev) }
-
-// SetFence 记录公会当前主人任期，旧主人的快照不能覆盖它。
-func (g *Guild) SetFence(term uint64) {
-	if term == 0 {
-		return
-	}
-	g.Lock()
-	if term > g.Fence {
-		g.Fence = term
-	}
-	g.Unlock()
-}
 
 // Copy 在锁内复制对外可见的公会字段。
 func (g *Guild) Copy() (name string, members []int64) {
@@ -92,26 +71,7 @@ func (g *Guild) HasMember(playerID int64) bool {
 	return false
 }
 
-// Persist 拷贝成员列表再落库，避免刷盘时和加入操作互相踩切片。
+// Persist 深拷贝成员列表再落库，避免刷盘时和加入操作互相踩切片。
 func (g *Guild) Persist() (uint64, any) {
-	doc := guildDoc{}
-	gen := g.Capture(func() {
-		members := append([]int64(nil), g.Members...)
-		doc = guildDoc{OID: g.OID, GuildID: g.GuildID, Server: g.Server, Name: g.Name, Members: members, Fence: g.Fence}
-	})
-	doc.Rev = gen
-	return gen, doc
+	return entity.PersistBSON(&g.State, g)
 }
-
-type guildDoc struct {
-	OID     primitive.ObjectID `bson:"_id"`
-	GuildID int64              `bson:"id"`
-	Server  int32              `bson:"server_id"`
-	Name    string             `bson:"name"`
-	Members []int64            `bson:"members"`
-	Rev     uint64             `bson:"rev,omitempty"`
-	Fence   uint64             `bson:"fence,omitempty"`
-}
-
-// DocVersion 提供条件写使用的代数和任期。
-func (d guildDoc) DocVersion() (uint64, uint64) { return d.Rev, d.Fence }

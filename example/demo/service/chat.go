@@ -34,11 +34,10 @@ func (s *ChatService) Send(ctx *handler.Context, text string) error {
 	if len(text) < 1 || len(text) > 80 {
 		return ErrBadText
 	}
-	v, err := ctx.GetPlayer()
+	p, err := handler.Player[*entity.Player](ctx)
 	if err != nil {
 		return err
 	}
-	p := v.(*entity.Player)
 	body, err := proto.Marshal(&game.ChatPush{Name: p.Snapshot().Name, Text: text})
 	if err != nil {
 		return err

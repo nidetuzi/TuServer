@@ -17,6 +17,7 @@ import (
 	"tuserv/pkg/handler"
 	"tuserv/pkg/logic"
 	"tuserv/pkg/router"
+	routepb "tuserv/pkg/router/protobuf"
 	"tuserv/pkg/scheduler"
 	"tuserv/pkg/store/memory"
 )
@@ -29,7 +30,7 @@ func TestPlayerDailyLifecycle(t *testing.T) {
 	c := cache.New(mem)
 	players := service.NewPlayerService(c, mem, event.New()).WithDayClock(loc, func() time.Time { return now })
 	r := router.New[int32]()
-	router.Register(r, demohandler.CmdLogin, demohandler.OnLogin(players))
+	router.Register(r, demohandler.CmdLogin, routepb.Body(), demohandler.OnLogin(players))
 	app := logic.New(r, nil)
 	app.KeyLoad = players.GetByKey
 	app.Scheduler, _ = scheduler.New(scheduler.Config{})

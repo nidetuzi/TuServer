@@ -132,18 +132,13 @@ func (s *PlayerService) AddExp(ctx *handler.Context, exp int32) (*entity.Player,
 	if exp <= 0 {
 		return nil, ErrBadExp
 	}
-	v, err := ctx.GetPlayer()
-	if err != nil {
-		return nil, err
-	}
-	p := v.(*entity.Player)
-	if term, ok := lease.Term(ctx); ok {
-		p.SetFence(term)
-	}
-	levels := p.AddExp(exp)
-	for _, level := range levels {
-		s.bus.Publish(ctx, event.PlayerLevelUp{Player: p, Level: level})
-	}
-	p.MarkDirty()
-	return p, nil
+	return handler.Mutate(ctx, func(p *entity.Player) (*entity.Player, error) {
+		if term, ok := lease.Term(ctx); ok {
+			p.SetFence(term)
+		}
+		for _, level := range p.AddExp(exp) {
+			s.bus.Publish(ctx, event.PlayerLevelUp{Player: p, Level: level})
+		}
+		return p, nil
+	})
 }

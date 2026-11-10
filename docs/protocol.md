@@ -51,7 +51,7 @@
 ## 主要 API 与使用方法
 
 - `Packet{CmdID, ServerID, Body}`：业务无关的单帧。
-- `Codec.Encode(Packet)` / `Decode([]byte)`：可注入替代编解码器；替代实现必须遵守消耗字节和半包错误的约定，并确保成功时推进缓冲。
+- `Codec.Encode(Packet)` / `Decode([]byte)`：**帧解析器**，可注入替代实现（自定义长度头/魔数等）；必须遵守消耗字节和半包错误约定。协议体（玩法消息）不在本层解析，见 [Router / BodyCodec](router-handler.md)。
 - `NewAssembler(codec)` / `Push(data)`：用于单条 TCP 流；不要在多条连接间共享，也没有并发访问保护。
 - `Peer.ID()`、`WritePacket(pkt)`、`Close()`：网关只依赖该接口，不关心传输类型。
 - `Handler.OnOpen`、`OnPacket`、`OnClose`：生命周期适配点。只有 `OnPacket` 明确由每连接队列协程调用；不能假定三个回调都在同一个协程。

@@ -4,19 +4,20 @@
 
 ## 1. 职责和源码入口
 
-- [`pkg/router/router.go`](../pkg/router/router.go)：泛型 `Router[K comparable]` 保存键到原始处理函数的映射，`Register` 在边界执行 protobuf 解码和编码。
-- [`pkg/handler/context.go`](../pkg/handler/context.go)：请求身份、角色读取依赖、登录绑定回调和统一日志字段。
-- [`pkg/logic/app.go`](../pkg/logic/app.go)：在会话 actor 内创建上下文、注入 loader、执行路由并收集响应身份。
-- [`example/demo/register.go`](../example/demo/register.go)：真实注册示例。
-- [`pkg/router/router_test.go`](../pkg/router/router_test.go)：`int32` 与 `string` 键的端到端编解码测试。
+- [`pkg/router/router.go`](../pkg/router/router.go)：泛型 `Router[K comparable]`，核心只认 `Handle`/`Dispatch`（`[]byte`）。
+- [`pkg/router/codec.go`](../pkg/router/codec.go)：`BodyCodec` 与带编解码的 `Register`；不绑死 protobuf。
+- [`pkg/router/protobuf`](../pkg/router/protobuf)：可选 protobuf `BodyCodec` 适配。
+- [`pkg/handler/context.go`](../pkg/handler/context.go) / [`player.go`](../pkg/handler/player.go)：请求上下文、`Player[T]`、`Mutate`。
+- [`pkg/logic/app.go`](../pkg/logic/app.go) / [`module.go`](../pkg/logic/module.go)：会话 actor 调度与 `Module.Wire` 装配面。
+- [`example/demo/register.go`](../example/demo/register.go)、[`module.go`](../example/demo/module.go)：真实注册与模块挂载。
 
-Router 不选择节点、不建立 actor、不做认证、不维护角色缓存，也没有中间件、错误码映射或并发注册保护。Handler 上下文不是存储层，不缓存 `GetPlayer` 的结果，也不自动回包。
+Router 不选择节点、不建立 actor、不做认证、不维护角色缓存。换客户端协议时替换帧 Codec 与 BodyCodec，不必改 Logic/Router 核心。
 
 ## 2. 实际执行链路
 
 普通客户端帧的 `cmdId` 是 `int32`。Gate 经 Kitex 转成 `logic.Request` 后，`App.Handle` 先进入会话 actor，再创建框架 `handler.Context`，最后执行：
 
-`Router.Dispatch(key, ctx, body)` → 查找原始函数 → `proto.Unmarshal` → 具体玩法 handler → service → entity/同步本地事件 → handler 组响应 → `proto.Marshal`。
+`Router.Dispatch` → 已注册 `Handler` →（若用 `Register`+`BodyCodec`）`Unmarshal` → 玩法 handler/service → `Marshal` 回包。
 
 普通会话 actor 的实际键为 `session/<SessionID>`，空会话号为 `session/player`。cmd 0 是独立的通用主人入口：`App.Owners.Handle` 在会话邮箱外接收信封，再进入 `owner/...` 实体邮箱，不经过 Router 或 handler.Context；缺 Owners 直接失败。主人操作通过 `owner.Register/Call` 注册调用，不是用 Router 注册游戏 cmd 0，详见 [Logic 主人运行时](logic.md#4-公会主人路由当前实现与限制)。
 
@@ -29,21 +30,25 @@ Router 不选择节点、不建立 actor、不做认证、不维护角色缓存�
 ### 创建、注册与分发
 
 - `router.New[K]()` 创建空路由。`K` 必须 comparable，例如 `int32` 或 `string`；两种键使用不同实例，不在一张表中混用。
-- `r.Handle(key, h)` 注册 `router.Handler`，签名为 `func(*handler.Context, []byte) ([]byte, error)`。适合测试或非 protobuf 的原始处理；业务通常使用类型化 `Register`。
-- `router.Register(r, key, h)` 接收 `func(*handler.Context, *Req) (*Resp, error)`。泛型约束要求请求和响应的指针实现 `proto.Message`，所以应使用生成消息类型。
-- `r.Dispatch(key, ctx, body)` 同步执行已注册函数。没有该键返回 `router: no handler for <key>`，没有独立的哨兵错误。
+- `r.Handle(key, h)` 注册原始 `Handler`（`[]byte` in/out），适合自定义协议或测试。
+- `router.Register(r, key, codec, h)` 注入 `BodyCodec`，再调用 `func(*handler.Context, *Req) (*Resp, error)`。Demo 传入 `routepb.Body()`；其他游戏可注入 JSON/自定义实现。
+- `r.Dispatch(key, ctx, body)` 同步执行；未注册返回可 `errors.Is` 的 `ErrNoHandler`。
 
-后注册的相同键会覆盖旧函数，没有重复注册告警。内部 map 无锁，应在启动接入前完成注册，不在请求执行时热改；注册 nil 原始函数也没有保护。
+后注册的相同键会覆盖旧函数。内部 map 无锁，应在启动前完成注册。
 
 ### 类型化编解码的精确语义
 
-1. 为每次请求创建新的 `Req` 值并反序列化 Body。
-2. 解码失败直接返回错误，业务函数不会运行。
-3. 业务返回 error 时直接返回该错误，不编码其响应。
-4. 业务返回 `(nil, nil)` 时返回 `(nil, nil)` Body；这是成功的空响应，不代表框架自动发送推送或跳过 Gate 回包。
-5. 非 nil 响应交给 `proto.Marshal`，其错误向外传播。
+1. 为每次请求创建新的 `Req`，经 `codec.Unmarshal` 填入。
+2. 解码失败返回 `ErrBadMessage`，业务函数不会运行。
+3. 业务返回 error 时直接返回该错误，不编码响应。
+4. 业务返回 `(nil, nil)` 时 Body 为 nil（成功空响应）。
+5. 非 nil 响应经 `codec.Marshal` 写出。
 
-空 Body 在 protobuf 中可能是合法的零值消息；“是否必填”“是否允许空名字”等语义必须由 handler/service 校验。
+### Handler / Service 简繁分流
+
+- 简单、单实体、无复用：逻辑可写在 handler，用 `handler.Mutate`/`Player`。
+- 复杂、跨实体、owner、事件编排：放 service；handler 做门槛与回包映射。
+- 项目规则见 [`.cursor/rules/architecture.mdc`](../.cursor/rules/architecture.mdc)。
 
 ## 4. Context 的主要 API
 

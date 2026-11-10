@@ -30,6 +30,11 @@ func WithStaleHandler(prepare func(entity.Entity, uint64, uint64) func()) Option
 	return func(c *Cache) { c.prepareStale = prepare }
 }
 
+// SetStaleHandler 允许模块在 App 创建后再注入陈旧通知，避免 main 闭包引用玩法类型。
+func (c *Cache) SetStaleHandler(prepare func(entity.Entity, uint64, uint64) func()) {
+	c.prepareStale = prepare
+}
+
 // WithPolicy 打开淘汰。负数按关闭处理，避免配错把缓存立刻清空。
 func WithPolicy(p Policy) Option {
 	if p.MaxItems < 0 {

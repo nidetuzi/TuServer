@@ -8,6 +8,7 @@ import (
 	"tuserv/example/demo/service"
 	fw "tuserv/pkg/event"
 	"tuserv/pkg/router"
+	routepb "tuserv/pkg/router/protobuf"
 )
 
 // Deps 是演示玩法依赖的服务。
@@ -17,17 +18,23 @@ type Deps struct {
 	Chat    *service.ChatService
 	Guilds  *service.GuildService
 	Bus     *fw.Bus
+	// Codec 为空时使用 protobuf 适配，便于测试与换协议。
+	Codec router.BodyCodec
 }
 
 // Register 把 1001 到 1006 注册到路由，并挂上升级奖励。
 // 监听者必须在第一条升级请求之前注册，否则第一次升级不会发道具。
 func Register(r *router.Router[int32], d Deps) {
-	router.Register(r, handler.CmdLogin, handler.OnLogin(d.Players))
-	router.Register(r, handler.CmdLevelUp, handler.OnLevelUp(d.Players))
-	router.Register(r, handler.CmdUseItem, handler.OnUseItem(d.Bags))
-	router.Register(r, handler.CmdChat, handler.OnChat(d.Chat))
-	router.Register(r, handler.CmdCreateGuild, handler.OnCreateGuild(d.Guilds))
-	router.Register(r, handler.CmdJoinGuild, handler.OnJoinGuild(d.Guilds))
+	codec := d.Codec
+	if codec == nil {
+		codec = routepb.Body()
+	}
+	router.Register(r, handler.CmdLogin, codec, handler.OnLogin(d.Players))
+	router.Register(r, handler.CmdLevelUp, codec, handler.OnLevelUp(d.Players))
+	router.Register(r, handler.CmdUseItem, codec, handler.OnUseItem(d.Bags))
+	router.Register(r, handler.CmdChat, codec, handler.OnChat(d.Chat))
+	router.Register(r, handler.CmdCreateGuild, codec, handler.OnCreateGuild(d.Guilds))
+	router.Register(r, handler.CmdJoinGuild, codec, handler.OnJoinGuild(d.Guilds))
 	if d.Bus != nil {
 		fw.On(d.Bus, event.OnLevelUpReward)
 	}

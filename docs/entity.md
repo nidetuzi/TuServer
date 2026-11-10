@@ -2,9 +2,9 @@
 
 ## 职责与源码入口
 
-本包只定义缓存可识别的实体接口、可嵌入的脏状态和业务编号编码，不包含 BSON 文档模型、数据库访问或路由执行器。
+本包定义缓存可识别的实体接口、可嵌入的脏状态、`Identity`/`PersistBSON` 样板消减，以及业务编号编码；不包含数据库访问或路由执行器。
 
-- [实体与 State 实现](../pkg/entity/entity.go)、[编号实现](../pkg/entity/id.go)、[包说明](../pkg/entity/doc.go)。
+- [实体与 State](../pkg/entity/entity.go)、[Identity](../pkg/entity/identity.go)、[PersistBSON](../pkg/entity/persist.go)、[编号](../pkg/entity/id.go)。
 - 真实实体：[Player](../example/demo/entity/player.go)、[Guild](../example/demo/entity/guild.go)。
 - 配套：[缓存](cache.md)、[存储](store.md)、[actor](actor.md)、[事件](event.md)。
 
@@ -20,7 +20,7 @@
 
 1. service 修改实体后调用 `MarkDirty()`，代数加一，标记变脏。
 2. 缓存筛选脏实体，调用实体的可选 `Persist() (uint64, any)`；没有该方法则退化为 `BeginSave()` 加实体本身。
-3. `Persist` 可通过 `State.Capture` 在状态锁内深拷贝持久化字段并取代数；网络保存不持有这把锁。
+3. Demo 实体嵌入 `Identity`（含 State/OID/Rev/Fence），`Persist` 调用 `PersistBSON` 在锁内 bson 深拷贝，无需平行 Doc 类型。
 4. 保存成功调用 `EndSave(gen)`。仅当前代数仍等于保存代数时清脏；期间发生 `MarkDirty()` 就保留脏标记，等待下一次 Flush。
 
 `State` 只维护标记，并不自动拦截字段赋值。`BeginSave` 只读代数，不拍快照、不清脏；`EndSave` 也不验证数据库结果，由调用方保证仅在保存成功后调用。

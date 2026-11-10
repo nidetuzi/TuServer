@@ -6,24 +6,21 @@ import (
 	"context"
 	"os"
 	"os/signal"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
 	"tuserv/example/demo"
-	demoentity "tuserv/example/demo/entity"
-	"tuserv/example/demo/service"
 	node "tuserv/kitex_gen/node"
 	logiccli "tuserv/kitex_gen/node/logic"
 	"tuserv/pkg/cache"
 	"tuserv/pkg/cluster"
 	"tuserv/pkg/config"
-	"tuserv/pkg/entity"
 	"tuserv/pkg/event"
 	"tuserv/pkg/log"
 	"tuserv/pkg/logic"
 	"tuserv/pkg/router"
+	routepb "tuserv/pkg/router/protobuf"
 	"tuserv/pkg/scheduler"
 	mongostore "tuserv/pkg/store/mongo"
 )
@@ -69,15 +66,9 @@ func main() {
 		os.Exit(1)
 	}
 	bus := event.New()
-	var app *logic.App
 	c := cache.New(store, cache.WithPolicy(cache.Policy{
 		MaxItems: cfg.CacheMaxItems(),
 		Idle:     cfg.CacheIdle(),
-	}), cache.WithStaleHandler(func(e entity.Entity, _, fence uint64) func() {
-		if p, ok := e.(*demoentity.Player); ok && app != nil {
-			return app.PrepareStalePlayer(p.ServerID(), p.Snapshot().PlayerID, fence)
-		}
-		return nil
 	}))
 	dayLocation, err := time.LoadLocation(schedulerConfig.Timezone)
 	if schedulerConfig.Timezone == "" {
@@ -87,11 +78,8 @@ func main() {
 		log.Error("player day timezone", "err", err)
 		os.Exit(1)
 	}
-	players := service.NewPlayerService(c, store, bus).WithDayClock(dayLocation, time.Now)
-	chat := service.NewChatService(&notifyAll{nodes: nodes})
 	r := router.New[int32]()
-	app = logic.New(r, nil)
-	app.KeyLoad = players.GetByKey
+	app := logic.New(r, nil)
 	app.Scheduler = tasks
 	self := cfg.AdvertiseAddr
 	if self == "" {
@@ -106,49 +94,27 @@ func main() {
 			_, err := nodes.Dispatch(ctx, host, logic.Request{GateID: logic.InternalCaller, CmdID: logic.CmdRelinquish, Internal: true, Body: body})
 			return err
 		},
-		TouchKey: func(ctx context.Context, serverID int32, key string, term uint64) {
-			v, err := players.GetByKey(ctx, serverID, key)
-			if err != nil {
-				return
-			}
-			if p, ok := v.(*demoentity.Player); ok {
-				p.SetFence(term)
-			}
-		},
-		FlushKey: func(ctx context.Context, serverID int32, key string) error {
-			e, err := c.Get(ctx, serverID, "player", key, nil)
-			if err != nil {
-				return nil
-			}
-			err = c.FlushEntity(ctx, e)
-			c.Forget(e)
-			return err
-		},
-		FlushID: func(ctx context.Context, serverID int32, collection string, id int64) error {
-			e, err := c.Get(ctx, serverID, collection, strconv.FormatInt(id, 10), nil)
-			if err != nil {
-				return nil
-			}
-			err = c.FlushEntity(ctx, e)
-			c.Forget(e)
-			return err
-		},
 		Kick: func(ctx context.Context, gateAddr, sessionID string) {
 			_ = nodes.Push(ctx, gateAddr, sessionID, logic.CmdKick, nil)
 		},
 		Guard: c.Guard,
-		PinKey: func(serverID int32, key string) func() {
-			return c.PinKey(serverID, "player", key)
-		},
 	}
-	demo.BindPlayerLifecycle(app, players)
-	guilds := service.NewGuildService(c, store, owners)
-	if err := guilds.RegisterOwners(); err != nil {
-		log.Error("register owner operations", "err", err)
+	if err := (demo.Module{}).Wire(&logic.Host{
+		App:         app,
+		Router:      r,
+		Cache:       c,
+		Store:       store,
+		Owners:      owners,
+		Bus:         bus,
+		BodyCodec:   routepb.Body(),
+		Self:        self,
+		DayLocation: dayLocation,
+		Now:         time.Now,
+		Broadcast:   &notifyAll{nodes: nodes},
+	}); err != nil {
+		log.Error("wire demo module", "err", err)
 		os.Exit(1)
 	}
-	app.Owners = owners
-	demo.Register(r, demo.Deps{Players: players, Bags: service.NewBagService(), Chat: chat, Guilds: guilds, Bus: bus})
 	reg, err := cluster.NewRegistry(cfg.Etcd.Endpoints)
 	if err != nil {
 		log.Error("etcd registry", "err", err)
