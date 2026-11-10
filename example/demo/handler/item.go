@@ -8,8 +8,7 @@ import (
 )
 
 // OnUseItem 简单扣道具：校验后直接 Mutate，不强制再进一层 service。
-// Bags 仍注入是为了兼容旧测试装配；逻辑本身不依赖它。
-func OnUseItem(_ *service.BagService) func(*handler.Context, *game.UseItemReq) (*game.UseItemResp, error) {
+func OnUseItem() func(*handler.Context, *game.UseItemReq) (*game.UseItemResp, error) {
 	return func(ctx *handler.Context, req *game.UseItemReq) (*game.UseItemResp, error) {
 		itemID, count := req.GetItemId(), req.GetCount()
 		if itemID <= 0 || count <= 0 {

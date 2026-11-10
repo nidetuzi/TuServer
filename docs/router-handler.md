@@ -7,8 +7,8 @@
 - [`pkg/router/router.go`](../pkg/router/router.go)：泛型 `Router[K comparable]`，核心只认 `Handle`/`Dispatch`（`[]byte`）。
 - [`pkg/router/codec.go`](../pkg/router/codec.go)：`BodyCodec` 与带编解码的 `Register`；不绑死 protobuf。
 - [`pkg/router/protobuf`](../pkg/router/protobuf)：可选 protobuf `BodyCodec` 适配。
-- [`pkg/handler/context.go`](../pkg/handler/context.go) / [`player.go`](../pkg/handler/player.go)：请求上下文、`Player[T]`、`Mutate`。
-- [`pkg/logic/app.go`](../pkg/logic/app.go) / [`module.go`](../pkg/logic/module.go)：会话 actor 调度与 `Module.Wire` 装配面。
+- [`pkg/handler/context.go`](../pkg/handler/context.go) / [`player.go`](../pkg/handler/player.go)：请求上下文、`Player[T]`、`Mutate`/`MutateDo`。
+- [`pkg/logic/app.go`](../pkg/logic/app.go) / [`module.go`](../pkg/logic/module.go) / [`bind_cache.go`](../pkg/logic/bind_cache.go)：会话 actor、`Module.Wire`、`BindLocalCache`/`BindPlayerStale`。
 - [`example/demo/register.go`](../example/demo/register.go)、[`module.go`](../example/demo/module.go)：真实注册与模块挂载。
 
 Router 不选择节点、不建立 actor、不做认证、不维护角色缓存。换客户端协议时替换帧 Codec 与 BodyCodec，不必改 Logic/Router 核心。
@@ -46,8 +46,9 @@ Router 不选择节点、不建立 actor、不做认证、不维护角色缓存�
 
 ### Handler / Service 简繁分流
 
-- 简单、单实体、无复用：逻辑可写在 handler，用 `handler.Mutate`/`Player`。
-- 复杂、跨实体、owner、事件编排：放 service；handler 做门槛与回包映射。
+- 简单、单实体、无复用：逻辑可写在 handler，用 `handler.Mutate`/`MutateDo`/`Player`。
+- 复杂、跨实体、owner、事件编排：放 service（校验以 service 为准）；handler 做调用与回包映射。
+- 推送编码注入 `BodyCodec`，不要写进 service；本地集合钩子用 `logic.BindLocalCache`。
 - 项目规则见 [`.cursor/rules/architecture.mdc`](../.cursor/rules/architecture.mdc)。
 
 ## 4. Context 的主要 API

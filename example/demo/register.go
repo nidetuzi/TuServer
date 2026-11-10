@@ -14,7 +14,6 @@ import (
 // Deps 是演示玩法依赖的服务。
 type Deps struct {
 	Players *service.PlayerService
-	Bags    *service.BagService
 	Chat    *service.ChatService
 	Guilds  *service.GuildService
 	Bus     *fw.Bus
@@ -31,7 +30,7 @@ func Register(r *router.Router[int32], d Deps) {
 	}
 	router.Register(r, handler.CmdLogin, codec, handler.OnLogin(d.Players))
 	router.Register(r, handler.CmdLevelUp, codec, handler.OnLevelUp(d.Players))
-	router.Register(r, handler.CmdUseItem, codec, handler.OnUseItem(d.Bags))
+	router.Register(r, handler.CmdUseItem, codec, handler.OnUseItem())
 	router.Register(r, handler.CmdChat, codec, handler.OnChat(d.Chat))
 	router.Register(r, handler.CmdCreateGuild, codec, handler.OnCreateGuild(d.Guilds))
 	router.Register(r, handler.CmdJoinGuild, codec, handler.OnJoinGuild(d.Guilds))

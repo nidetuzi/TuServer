@@ -28,8 +28,7 @@ func Example() {
 	defer app.Stop()
 	app.Hooks.OnOnline = func(session logic.Session) {
 		_, err := app.AddPlayerTask(session, "online-exp", "@every 30s", func(ctx *handler.Context) error {
-			_, err := players.AddExp(ctx, 1)
-			return err
+			return players.AddExp(ctx, 1)
 		})
 		if err != nil {
 			panic(err)

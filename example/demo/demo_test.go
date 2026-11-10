@@ -41,9 +41,8 @@ func TestDemoFlows(t *testing.T) {
 	c := cache.New(mem)
 	bus := event.New()
 	players := service.NewPlayerService(c, mem, bus)
-	bags := service.NewBagService()
 	chatBus := &recordBroadcaster{ch: make(chan int32, 1)}
-	chat := service.NewChatService(chatBus)
+	chat := service.NewChatService(chatBus, pushCodec{})
 	r := router.New[int32]()
 	app := logic.New(r, nil)
 	app.KeyLoad = players.GetByKey
@@ -54,7 +53,7 @@ func TestDemoFlows(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.Owners = owners
-	Register(r, Deps{Players: players, Bags: bags, Chat: chat, Guilds: guilds, Bus: bus})
+	Register(r, Deps{Players: players, Chat: chat, Guilds: guilds, Bus: bus})
 
 	loginBody, _ := proto.Marshal(&game.LoginReq{Username: "ann"})
 	resp, err := app.Handle(context.Background(), logic.Request{

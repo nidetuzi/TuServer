@@ -22,11 +22,10 @@ func (s *PlayerService) WithDayClock(location *time.Location, now func() time.Ti
 // CheckNewDay 是登录和在线任务共用的跨天入口，只能在持有写权的角色 actor 中调用。
 // 登录、离线时间提供持久化基准，在线期间用内存检查时间防止同一天重复触发。
 func (s *PlayerService) CheckNewDay(ctx *handler.Context) (bool, error) {
-	v, err := ctx.GetPlayer()
+	p, err := handler.Player[*entity.Player](ctx)
 	if err != nil {
 		return false, err
 	}
-	p := v.(*entity.Player)
 	now := s.now()
 	crossed := p.CheckNewDay(now, s.location)
 	if crossed {
@@ -41,24 +40,16 @@ func (s *PlayerService) OnOnline(ctx *handler.Context) error {
 	if _, err := s.CheckNewDay(ctx); err != nil {
 		return err
 	}
-	v, err := ctx.GetPlayer()
-	if err != nil {
-		return err
-	}
-	p := v.(*entity.Player)
-	p.NoteLogin(s.now())
-	p.MarkDirty()
-	return nil
+	return handler.MutateDo(ctx, func(p *entity.Player) error {
+		p.NoteLogin(s.now())
+		return nil
+	})
 }
 
 // OnOffline 在框架仍持有角色租约、缓存保护且尚未刷盘时记录离线时间。
 func (s *PlayerService) OnOffline(ctx *handler.Context) error {
-	v, err := ctx.GetPlayer()
-	if err != nil {
-		return err
-	}
-	p := v.(*entity.Player)
-	p.NoteOffline(s.now())
-	p.MarkDirty()
-	return nil
+	return handler.MutateDo(ctx, func(p *entity.Player) error {
+		p.NoteOffline(s.now())
+		return nil
+	})
 }

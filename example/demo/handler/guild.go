@@ -6,12 +6,9 @@ import (
 	"tuserv/pkg/handler"
 )
 
-// OnCreateGuild 校验公会名。成员写入由 service 在主人节点完成。
+// OnCreateGuild 公会名门槛由 service 校验；成员写入在主人节点完成。
 func OnCreateGuild(svc *service.GuildService) func(*handler.Context, *game.CreateGuildReq) (*game.GuildResp, error) {
 	return func(ctx *handler.Context, req *game.CreateGuildReq) (*game.GuildResp, error) {
-		if req.GetName() == "" || len(req.GetName()) > 16 {
-			return nil, service.ErrBadName
-		}
 		g, err := svc.Create(ctx, req.GetName())
 		if err != nil {
 			return nil, err
@@ -20,12 +17,9 @@ func OnCreateGuild(svc *service.GuildService) func(*handler.Context, *game.Creat
 	}
 }
 
-// OnJoinGuild 校验公会编号。已入会的判断在 service 里，因为要读到角色。
+// OnJoinGuild 公会编号门槛由 service 校验。
 func OnJoinGuild(svc *service.GuildService) func(*handler.Context, *game.JoinGuildReq) (*game.GuildResp, error) {
 	return func(ctx *handler.Context, req *game.JoinGuildReq) (*game.GuildResp, error) {
-		if req.GetGuildId() == 0 {
-			return nil, service.ErrBadArg
-		}
 		g, err := svc.Join(ctx, req.GetGuildId())
 		if err != nil {
 			return nil, err

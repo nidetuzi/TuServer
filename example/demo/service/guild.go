@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 
@@ -97,11 +96,7 @@ func (s *GuildService) Create(ctx *handler.Context, name string) (*GuildResult, 
 	if p.Guild() != 0 {
 		return nil, ErrAlreadyInGuild
 	}
-	id, err := s.store.NextID(ctx, ctx.ServerID, "guild")
-	if err != nil {
-		return nil, err
-	}
-	guildID, err := core.WithServer(ctx.ServerID, id)
+	guildID, err := core.NextBizID(ctx, s.store, ctx.ServerID, "guild")
 	if err != nil {
 		return nil, err
 	}
@@ -144,15 +139,7 @@ func guildResult(g *entity.Guild) GuildResult {
 
 // Get 只应在主人邮箱内调用，缓存未命中时由框架加载公会。
 func (s *GuildService) Get(ctx context.Context, serverID int32, guildID int64) (*entity.Guild, error) {
-	e, err := s.cache.GetByBizID(ctx, s.store, serverID, "guild", guildID, func() core.Entity { return &entity.Guild{} })
-	if err != nil {
-		return nil, err
-	}
-	g, ok := e.(*entity.Guild)
-	if !ok {
-		return nil, errors.New("service: guild type")
-	}
-	return g, nil
+	return cache.GetByBizIDOf[*entity.Guild](ctx, s.cache, s.store, serverID, "guild", guildID)
 }
 
 func (s *GuildService) keep(g *entity.Guild) {

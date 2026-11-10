@@ -3,6 +3,8 @@ package cache
 import (
 	"context"
 	"errors"
+	"fmt"
+	"reflect"
 	"strconv"
 
 	"tuserv/pkg/entity"
@@ -31,4 +33,24 @@ func (c *Cache) GetByBizID(ctx context.Context, st store.Store, serverID int32, 
 	}
 	c.Alias(e, key)
 	return e, nil
+}
+
+// GetByBizIDOf 按业务编号读取并断言为指针实体类型 T（例如 *Guild）。
+func GetByBizIDOf[T entity.Entity](ctx context.Context, c *Cache, st store.Store, serverID int32, collection string, id int64) (T, error) {
+	var zero T
+	rt := reflect.TypeOf(zero)
+	if rt == nil || rt.Kind() != reflect.Pointer {
+		return zero, errors.New("cache: GetByBizIDOf requires pointer entity type")
+	}
+	e, err := c.GetByBizID(ctx, st, serverID, collection, id, func() entity.Entity {
+		return reflect.New(rt.Elem()).Interface().(entity.Entity)
+	})
+	if err != nil {
+		return zero, err
+	}
+	out, ok := e.(T)
+	if !ok {
+		return zero, fmt.Errorf("cache: entity type %T is not %T", e, zero)
+	}
+	return out, nil
 }

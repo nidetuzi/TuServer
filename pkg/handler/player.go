@@ -36,3 +36,11 @@ func Mutate[T Dirty, R any](ctx *Context, fn func(T) (R, error)) (R, error) {
 	p.MarkDirty()
 	return out, nil
 }
+
+// MutateDo 是无返回值的 Mutate，避免业务为了打脏硬返回实体指针。
+func MutateDo[T Dirty](ctx *Context, fn func(T) error) error {
+	_, err := Mutate(ctx, func(p T) (struct{}, error) {
+		return struct{}{}, fn(p)
+	})
+	return err
+}

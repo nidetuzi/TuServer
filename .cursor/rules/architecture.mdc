@@ -7,9 +7,9 @@ alwaysApply: true
 
 - 模块是 `tuserv`。框架在 `pkg`，进程在 `cmd`，玩法 demo 在 `example/demo`。单测和被测文件放在一起。
 - 请求路径是 handler、service、entity。玩法通过 `logic.Module.Wire` 挂到进程，不要在 `cmd/logic` 散落具体实体类型断言。
-- **Handler / Service 简繁分流**：简单、单实体、无复用的规则可直接写在 handler（可用 `handler.Mutate`/`Player`）；复杂、跨实体、要复用、含 owner/事件编排的逻辑放 service；handler 做参数门槛、调 service、填响应。换客户端协议时只换帧/`BodyCodec` 与 handler 的 req/resp 映射，service 不依赖具体 IDL。
-- 改当前会话玩家优先用 `handler.Mutate`（成功才 `MarkDirty`）；只读写 `handler.Player[T]`。共享实体主人操作优先用 `owner.OnMutate`/`OnCreate`，跨实体回写仍在调用侧。
-- 业务只调用缓存的 `Get`/`GetByBizID`。未命中时由框架内部加载 Mongo。不要在业务包里调用 `Load`。
+- **Handler / Service 简繁分流**：简单、单实体、无复用的规则可直接写在 handler（可用 `handler.Mutate`/`MutateDo`/`Player`）；复杂、跨实体、要复用、含 owner/事件编排的逻辑放 service；复杂路径以 service 校验为准，handler 只做调用与 req/resp 映射。换客户端协议时只换帧/`BodyCodec` 与 handler 映射，service 不依赖具体 IDL；**推送编码也不进 service**（注入 `BodyCodec`/推送编码器）。
+- 改当前会话玩家优先用 `handler.Mutate`/`MutateDo`（成功才 `MarkDirty`）；只读写 `handler.Player[T]`。共享实体主人操作优先用 `owner.OnMutate`/`OnCreate`，跨实体回写仍在调用侧。业务编号用 `entity.NextBizID`；本地集合钩子用 `logic.BindLocalCache`/`BindPlayerStale`。
+- 业务只调用缓存的 `Get`/`GetByBizID`/`GetByBizIDOf`。未命中时由框架内部加载 Mongo。不要在业务包里调用 `Load`。
 - 修改实体只打脏标记。落库由节点定时刷盘，退出前再刷一次。
 - 角色属于会话所在节点。公会按实体键转到主人节点，非主人用 Kitex 转发。actor 处理中禁止同步 RPC 回自己。
 - 客户端协议可替换：Gate 注入帧 `protocol.Codec`；Logic 路由注入 `router.BodyCodec`（protobuf 只是可选适配）。框架只认 `CmdID + []byte`。节点之间只用 Kitex。游戏协议号不要写成 Kitex 方法。

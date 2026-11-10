@@ -6,12 +6,9 @@ import (
 	"tuserv/pkg/handler"
 )
 
-// OnChat 校验文本长度。广播由 service 发给所有逻辑节点。
+// OnChat 文本门槛由 service 校验；handler 只做调用与空回包。
 func OnChat(svc *service.ChatService) func(*handler.Context, *game.ChatReq) (*game.ChatResp, error) {
 	return func(ctx *handler.Context, req *game.ChatReq) (*game.ChatResp, error) {
-		if len(req.GetText()) < 1 || len(req.GetText()) > 80 {
-			return nil, service.ErrBadText
-		}
 		if err := svc.Send(ctx, req.GetText()); err != nil {
 			return nil, err
 		}

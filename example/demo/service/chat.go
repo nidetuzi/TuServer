@@ -3,11 +3,9 @@ package service
 import (
 	"context"
 
-	"google.golang.org/protobuf/proto"
-
 	"tuserv/example/demo/entity"
-	"tuserv/example/demo/gen/game"
 	"tuserv/pkg/handler"
+	"tuserv/pkg/router"
 )
 
 // CmdChatPush 是推给客户端的聊天协议号，和请求号分开，客户端才能区分回包和广播。
@@ -19,14 +17,24 @@ type Broadcaster interface {
 	NotifyServer(ctx context.Context, serverID, cmdID int32, body []byte) error
 }
 
-// ChatService 校验通过后组广播包。它不写库。
-type ChatService struct {
-	bus Broadcaster
+// ChatPushView 是协议无关的聊天推送内容，编码由注入的 BodyCodec 完成。
+type ChatPushView struct {
+	Name string
+	Text string
 }
 
-// NewChatService 创建聊天服务。
-func NewChatService(bus Broadcaster) *ChatService {
-	return &ChatService{bus: bus}
+// ChatService 校验通过后组广播包。它不写库，也不依赖具体 IDL。
+type ChatService struct {
+	bus  Broadcaster
+	push router.BodyCodec
+}
+
+// NewChatService 创建聊天服务。push 负责把 ChatPushView 编成客户端正文。
+func NewChatService(bus Broadcaster, push router.BodyCodec) *ChatService {
+	if push == nil {
+		panic("service: chat push codec is required")
+	}
+	return &ChatService{bus: bus, push: push}
 }
 
 // Send 异步广播。在玩家 actor 里同步等待全部节点会把邮箱堵死。
@@ -38,7 +46,7 @@ func (s *ChatService) Send(ctx *handler.Context, text string) error {
 	if err != nil {
 		return err
 	}
-	body, err := proto.Marshal(&game.ChatPush{Name: p.Snapshot().Name, Text: text})
+	body, err := s.push.Marshal(CmdChatPush, ChatPushView{Name: p.Snapshot().Name, Text: text})
 	if err != nil {
 		return err
 	}

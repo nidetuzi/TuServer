@@ -74,7 +74,7 @@ func TestPlayerDailyLifecycle(t *testing.T) {
 		t.Fatalf("在线检查未注册: %+v", entries)
 	}
 	hctx := handler.New(ctx, handler.Meta{ServerID: 1, PlayerID: id, PlayerKey: get().CacheKey()}).WithKeyLoader(players.GetByKey)
-	if _, err := players.AddExp(hctx, 10); err != nil {
+	if err := players.AddExp(hctx, 10); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Minute)
@@ -93,7 +93,7 @@ func TestPlayerDailyLifecycle(t *testing.T) {
 	if crossed, err := players.CheckNewDay(hctx); err != nil || crossed {
 		t.Fatalf("同日在线检查重复触发: %v %v", crossed, err)
 	}
-	if _, err := players.AddExp(hctx, 7); err != nil {
+	if err := players.AddExp(hctx, 7); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.Handle(ctx, logic.Request{Internal: true, CmdID: logic.CmdDisconnect, GateID: "gate", SessionID: "one", ServerID: 1, PlayerID: id}); err != nil {

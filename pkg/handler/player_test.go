@@ -36,6 +36,16 @@ func TestPlayerAndMutate(t *testing.T) {
 	if err == nil || p.dirty {
 		t.Fatalf("Mutate failure should not dirty: dirty=%v err=%v", p.dirty, err)
 	}
+	if err := MutateDo(ctx, func(pl *memPlayer) error {
+		pl.n++
+		return nil
+	}); err != nil || !p.dirty || p.n != 3 {
+		t.Fatalf("MutateDo success: n=%d dirty=%v err=%v", p.n, p.dirty, err)
+	}
+	p.dirty = false
+	if err := MutateDo(ctx, func(*memPlayer) error { return errors.New("nope") }); err == nil || p.dirty {
+		t.Fatalf("MutateDo failure should not dirty: dirty=%v err=%v", p.dirty, err)
+	}
 }
 
 func TestPlayerTypeMismatch(t *testing.T) {

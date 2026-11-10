@@ -55,11 +55,7 @@ func (s *PlayerService) Login(ctx context.Context, serverID int32, username stri
 	}
 	p := entity.NewPlayer(serverID, "")
 	p.Username = username
-	id, err := s.store.NextID(ctx, serverID, "player")
-	if err != nil {
-		return nil, err
-	}
-	p.PlayerID, err = core.WithServer(serverID, id)
+	p.PlayerID, err = core.NextBizID(ctx, s.store, serverID, "player")
 	if err != nil {
 		return nil, err
 	}
@@ -128,17 +124,15 @@ func (s *PlayerService) GetByID(ctx context.Context, serverID int32, playerID in
 }
 
 // AddExp 增加经验。每次升级都发事件，奖励由监听者修改背包。
-func (s *PlayerService) AddExp(ctx *handler.Context, exp int32) (*entity.Player, error) {
+// 回包字段由 handler 再读 Player 快照，避免 Mutate 硬返回实体指针。
+func (s *PlayerService) AddExp(ctx *handler.Context, exp int32) error {
 	if exp <= 0 {
-		return nil, ErrBadExp
+		return ErrBadExp
 	}
-	return handler.Mutate(ctx, func(p *entity.Player) (*entity.Player, error) {
-		if term, ok := lease.Term(ctx); ok {
-			p.SetFence(term)
-		}
+	return handler.MutateDo(ctx, func(p *entity.Player) error {
 		for _, level := range p.AddExp(exp) {
 			s.bus.Publish(ctx, event.PlayerLevelUp{Player: p, Level: level})
 		}
-		return p, nil
+		return nil
 	})
 }

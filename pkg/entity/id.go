@@ -1,6 +1,11 @@
 package entity
 
-import "errors"
+import (
+	"context"
+	"errors"
+
+	"tuserv/pkg/store"
+)
 
 // IDSpan 是一个区服占用的编号宽度。特殊编号把区服放在高位，不同服的自增号才不会撞在一起。
 const IDSpan int64 = 100000
@@ -15,4 +20,16 @@ func WithServer(serverID int32, seq int64) (int64, error) {
 		return 0, ErrIDRange
 	}
 	return int64(serverID)*IDSpan + seq, nil
+}
+
+// NextBizID 从区服计数器取号并编成业务编号，避免业务重复写 NextID+WithServer。
+func NextBizID(ctx context.Context, st store.Store, serverID int32, kind string) (int64, error) {
+	if st == nil {
+		return 0, errors.New("entity: store is required")
+	}
+	seq, err := st.NextID(ctx, serverID, kind)
+	if err != nil {
+		return 0, err
+	}
+	return WithServer(serverID, seq)
 }

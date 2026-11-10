@@ -56,7 +56,7 @@
 
 ### 3.2 加经验：1002 与同步奖励
 
-[`OnLevelUp`](../example/demo/handler/levelup.go) 接收 `LevelUpReq{Exp}`，handler 与 `PlayerService.AddExp` 都要求 `Exp > 0`。service 通过 `ctx.GetPlayer()` 得到 `*entity.Player`：
+[`OnLevelUp`](../example/demo/handler/levelup.go) 接收 `LevelUpReq{Exp}`；经验门槛在 `PlayerService.AddExp`，内部用 `MutateDo` 升级并发布事件，handler 再读快照组包：
 
 1. `p.AddExp(exp)` 累加经验；升级阈值 `NeedExp(level) = 100 * level`，最低按 1 级计算。
 2. 可一次升多级，实体方法返回每次达到的新等级列表。
@@ -70,9 +70,7 @@
 
 ### 3.3 使用道具：1003
 
-[`OnUseItem`](../example/demo/handler/item.go) 接收 `UseItemReq{ItemId, Count}`；`BagService.Use(ctx, itemID, count)` 也校验二者正数。通过 Get 读角色，库存不足返回 `ErrNotEnough` 且不扣减，足够则 `BagAdd(itemID, -count)`、`MarkDirty` 并返回剩余数。数量扣到 0 时删除 map 键。
-
-当前只演示扣库存，不包含道具使用效果、配置表、流水、事务或溢出保护。
+[`OnUseItem`](../example/demo/handler/item.go) 是简单玩法：handler 内校验后 `Mutate` 调用 `TryUse`。库存不足返回 `ErrNotEnough` 且不扣减；扣到 0 时删除 map 键。当前只演示扣库存。
 
 ### 3.4 区服聊天：1004，推送 2001
 
@@ -172,11 +170,12 @@ handler/service 返回错误 → `router.Register` 不编码响应 → `App.Hand
 
 1. **协议（按游戏自选）**：Demo 若继续用 protobuf，修改 `example/demo/proto/game.proto` 后生成到 `example/demo/gen`（禁止手改生成物）。节点 Kitex IDL 变动时另改 `idl/node.proto`。不要为每个玩法协议新增 Kitex 方法。
 2. **实体**：嵌入 `entity.Identity`，`Persist` 调用 `entity.PersistBSON`；不维护平行 Doc 类型，不把网络消息当存档。
-3. **改玩家**：简单规则可直接写在 handler，用 `handler.Mutate`/`Player`；复杂/跨实体/事件/owner 编排放 service。不要手写 `GetPlayer` 断言 + 成功路径漏打脏。
-4. **共享实体**：启动用 `owner.OnCreate`/`OnMutate` 注册主人操作，调用侧 `owner.Call[DTO]`；业务编号查找用 `cache.GetByBizID`。跨实体回写（如玩家 GuildID）留在调用侧。
-5. **事件**：具体值类型同步监听；监听者在当前 actor 可改该角色并打脏。
-6. **注册与装配**：命令进 `cmd.go` 与 `Register`（注入 `BodyCodec`）；生产入口用 `Module.Wire`，不要改 `cmd/logic/main.go` 去断言玩法实体类型。
-7. **测试**：先测实体/服务，再经 `App.Handle`，必要时补 owner 边界。注释用中文。
+3. **改玩家**：简单规则可直接写在 handler，用 `handler.Mutate`/`MutateDo`/`Player`；复杂/跨实体/事件/owner 编排放 service（校验以 service 为准）。无返回值改写用 `MutateDo`。业务编号用 `entity.NextBizID`。
+4. **共享实体**：启动用 `owner.OnCreate`/`OnMutate`；调用侧 `owner.Call[DTO]`；查找用 `cache.GetByBizIDOf`。跨实体回写留在调用侧。
+5. **推送**：service 只产视图（如 `ChatPushView`），编码由 Wire 注入的推送 `BodyCodec` 完成，不要在 service 里 `proto.Marshal`。
+6. **事件**：具体值类型同步监听；监听者在当前 actor 可改该角色并打脏。
+7. **注册与装配**：命令进 `cmd.go` 与 `Register`；`Module.Wire` 用 `logic.BindLocalCache`/`BindPlayerStale`，不要在 main 断言玩法类型。
+8. **测试**：先测实体/服务，再经 `App.Handle`，必要时补 owner 边界。注释用中文。
 
 ## 8. 已有测试及覆盖边界
 

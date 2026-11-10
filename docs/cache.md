@@ -6,7 +6,7 @@
 - 上游是 service，下游是 [Store](store.md)；缓存只操作 [Entity](entity.md) 接口，不认识具体玩法。
 - [Logic 进程装配](../cmd/logic/main.go)、[刷盘配置](../pkg/config/config.go)、[角色服务](../example/demo/service/player.go)。
 
-业务读取应走 `Get` 或按业务编号的 `GetByBizID`（别名 → `Find("id")` → `Get` → `Alias`），未命中时由缓存内部调用存储 `Load`；业务修改实体并 `MarkDirty`，由节点定时 Flush，而不是每次请求直接写库。
+业务读取应走 `Get`、按业务编号的 `GetByBizID`，或类型化的 `GetByBizIDOf[T]`（别名 → `Find("id")` → `Get` → `Alias`），未命中时由缓存内部调用存储 `Load`；业务修改实体并 `MarkDirty`，由节点定时 Flush，而不是每次请求直接写库。
 
 ## 实际架构与执行流程
 
