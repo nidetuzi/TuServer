@@ -11,16 +11,22 @@ type abandonTask struct {
 	binding binding
 	held    error
 	stale   bool
+	// offline 为真时重试断线收尾（刷盘、放租约、清绑定），不再跑 OnPlayerOffline。
+	offline bool
 }
 
 // RenewErrorCount 返回未能确认续租成功的累计条数，便于节点监控区分存储故障和失租。
 func (a *App) RenewErrorCount() uint64 { return a.renewErrors.Load() }
 
 func (a *App) queueAbandon(b binding, held error) {
-	a.queueCleanup(b, held, false)
+	a.queueCleanup(b, held, false, false)
 }
 
-func (a *App) queueCleanup(b binding, held error, stale bool) {
+func (a *App) queueOfflineRetry(b binding) {
+	a.queueCleanup(b, nil, false, true)
+}
+
+func (a *App) queueCleanup(b binding, held error, stale, offline bool) {
 	key := playerActorKey(b.ServerID, b.PlayerID)
 	a.abandonMu.Lock()
 	defer a.abandonMu.Unlock()
@@ -31,7 +37,7 @@ func (a *App) queueCleanup(b binding, held error, stale bool) {
 	if _, ok := a.abandonPending[key]; ok {
 		return
 	}
-	a.abandonPending[key] = &abandonTask{binding: b, held: held, stale: stale}
+	a.abandonPending[key] = &abandonTask{binding: b, held: held, stale: stale, offline: offline}
 	if a.abandonActive < DefaultReapParallel {
 		a.abandonActive++
 		go a.abandonWorker()
@@ -64,9 +70,12 @@ func (a *App) abandonWorker() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			a.withGuard(func() {
-				if task.stale {
+				switch {
+				case task.offline:
+					_ = a.finishOfflineInActor(ctx, task.binding, false)
+				case task.stale:
 					a.discardStaleInActor(ctx, task.binding)
-				} else {
+				default:
 					a.abandonLostInActor(ctx, task.binding, task.held)
 				}
 			})

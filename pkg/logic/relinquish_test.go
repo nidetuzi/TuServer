@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,7 +97,7 @@ func TestRelinquishFlushFailureKeepsLease(t *testing.T) {
 	}
 }
 
-// TestDisconnectFlushFailureKeepsLease 断线刷盘失败时不能交出租约。
+// TestDisconnectFlushFailureKeepsLease 断线刷盘失败时不能交出租约，并标记待重试收尾。
 func TestDisconnectFlushFailureKeepsLease(t *testing.T) {
 	mem := memory.New()
 	now := time.Unix(1_700_000_000, 0)
@@ -115,12 +116,92 @@ func TestDisconnectFlushFailureKeepsLease(t *testing.T) {
 	if !errors.Is(err, flushErr) {
 		t.Fatalf("刷盘失败应返回错误: %v", err)
 	}
-	if got := app.Sessions(1); len(got) != 1 || got[0].ID != "sess-a" {
-		t.Fatalf("刷盘失败应保留绑定以便续租: %+v", got)
+	app.mu.Lock()
+	b, ok := app.bound[playerActorKey(1, playerID)]
+	app.mu.Unlock()
+	if !ok || !b.offlinePending || b.ID != "sess-a" {
+		t.Fatalf("刷盘失败应保留绑定并标记 offlinePending: ok=%v %+v", ok, b)
 	}
 	after := peekLease(t, mem, 1, playerLeaseKey(1, playerID))
 	if after != before {
 		t.Fatalf("刷盘失败不应释放租约: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestDisconnectFlushFailureRetriesOffline 续租轮询应重试断线收尾，刷盘恢复后交出并清绑定。
+func TestDisconnectFlushFailureRetriesOffline(t *testing.T) {
+	mem := memory.New()
+	now := time.Unix(1_700_000_000, 0)
+	playerID := mustPlayerID(t, 1, 9)
+	app := newLeaseApp(t, "node-a", mem, func() time.Time { return now })
+	var fail atomic.Bool
+	fail.Store(true)
+	app.Hooks.FlushID = func(context.Context, int32, string, int64) error {
+		if fail.Load() {
+			return errors.New("flush boom")
+		}
+		return nil
+	}
+
+	mustOnline(t, app, "gate-a", "sess-a", 1, playerID)
+	if err := app.onDisconnect(context.Background(), Request{
+		Internal: true, CmdID: CmdDisconnect, GateID: "gate-a", SessionID: "sess-a", ServerID: 1, PlayerID: playerID,
+	}); err == nil {
+		t.Fatal("首次刷盘失败应返回错误")
+	}
+	fail.Store(false)
+	app.RenewLeases(context.Background())
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		app.mu.Lock()
+		_, still := app.bound[playerActorKey(1, playerID)]
+		app.mu.Unlock()
+		rec := peekLease(t, mem, 1, playerLeaseKey(1, playerID))
+		if !still && rec.Owner == "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("重试收尾超时: bound=%v lease=%+v", still, rec)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestRelinquishOwnerStaleTermSkipsFlush 迟到的旧交接不能在刷盘前核任期失败后仍 Flush/Forget。
+func TestRelinquishOwnerStaleTermSkipsFlush(t *testing.T) {
+	mem := memory.New()
+	now := time.Unix(1_700_000_000, 0)
+	app := newLeaseApp(t, "node-a", mem, func() time.Time { return now })
+	var flushed int
+	app.Hooks.FlushID = func(context.Context, int32, string, int64) error {
+		flushed++
+		return nil
+	}
+	key := owner.Key(1, "guild", 7)
+	rec, err := lease.Claim(context.Background(), mem, 1, key.String(), "node-a", "", "", now, lease.TTL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = mem.MutateLease(context.Background(), 1, key.String(), func(cur store.LeaseRec) (store.LeaseRec, error) {
+		cur.Term = rec.Term + 1
+		return cur, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(Release{Kind: KindGuild, ServerID: 1, ID: 7, Term: rec.Term})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.relinquish(context.Background(), body); err != nil {
+		t.Fatal(err)
+	}
+	if flushed != 0 {
+		t.Fatalf("旧任期交接不应刷盘, flushed=%d", flushed)
+	}
+	after := peekLease(t, mem, 1, key.String())
+	if after.Owner != "node-a" || after.Term != rec.Term+1 {
+		t.Fatalf("旧交接不应释放新任期: %+v", after)
 	}
 }
 

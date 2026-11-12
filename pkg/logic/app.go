@@ -67,9 +67,11 @@ type Session struct {
 
 type binding struct {
 	Session
-	Term    uint64
-	unpin   func()
+	Term uint64
+	unpin func()
 	invalid bool
+	// offlinePending 表示连接已断但刷盘失败，需重试放租约与清绑定，避免假在线占租约。
+	offlinePending bool
 }
 
 // Hooks 是角色单写和踢线用的节点能力。测试可以只填其中几项。
@@ -303,6 +305,7 @@ func (a *App) handleInternal(ctx context.Context, req Request) (Response, error)
 // RenewLeases 只延长本节点仍持有的租约。
 // 空闲连接不再发协议时也要续约，否则过期后别的节点会接走还没刷盘的修改。
 // 一次批量写代替逐条 MutateLease，并且不能走 enter：Claim 失败会 AskRelease，锁外的旧快照可能把新会话踢掉。
+// 断线刷盘失败留下的 offlinePending 会在续租轮询里重新排队收尾。
 func (a *App) RenewLeases(ctx context.Context) {
 	if a.Hooks.Leases == nil {
 		return
@@ -324,6 +327,10 @@ func (a *App) RenewLeases(ctx context.Context) {
 		// 快照是锁外拷的。写之前再对一下，避免给已经换掉的会话或任期去延长租约。
 		if !a.bindingUnchanged(b) {
 			continue
+		}
+		if b.offlinePending {
+			// 先续租保住脏数据，再异步重试刷盘放权，避免假在线永久占租约。
+			a.queueOfflineRetry(b)
 		}
 		snaps = append(snaps, b)
 		items = append(items, store.LeaseTouch{
@@ -635,44 +642,88 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 				}
 				return
 			}
-			req.PlayerKey = b.PlayerKey
-			if err := a.beforePlayerOffline(ctx, req); err != nil {
-				offlineErr = err
-				return
-			}
-			if err := a.flushPlayer(ctx, b.Session); err != nil {
-				// 连接已断但仍持有租约，留给定时刷盘；交出租约会让对端读到旧档。
-				offlineErr = err
-				log.Warn("player offline flush failed", "session_id", req.SessionID, "server_id", req.ServerID, "player_id", req.PlayerID, "err", err)
-				return
-			}
-			if a.Hooks.Leases != nil {
-				_ = lease.Release(ctx, a.Hooks.Leases, req.ServerID, playerLeaseKey(req.ServerID, req.PlayerID), a.Hooks.Self, b.Term)
-			}
-			var unpin func()
-			a.mu.Lock()
-			if cur, still := a.bound[key]; still && cur.ID == req.SessionID && (req.GateID == "" || cur.GateAddr == req.GateID) {
-				unpin = cur.unpin
-				a.cancelPlayerTasksLocked(key)
-				delete(a.bound, key)
-			}
-			if req.GateID == "" {
-				delete(a.sessions, req.SessionID)
-			} else if s, still := a.sessions[req.SessionID]; still && s.GateAddr == req.GateID {
-				delete(a.sessions, req.SessionID)
-			}
-			a.mu.Unlock()
-			// 刷盘和 Forget 完成后再放开。提前放开的话，淘汰会和这次交接抢同一份脏数据。
-			if unpin != nil {
-				unpin()
-			}
-			log.Info("player offline", "session_id", req.SessionID, "server_id", req.ServerID, "player_id", req.PlayerID, "gate", req.GateID, "term", b.Term)
+			offlineErr = a.finishOfflineInActor(ctx, b, true)
 		})
 	})
 	if runErr != nil {
 		return runErr
 	}
 	return offlineErr
+}
+
+// finishOfflineInActor 在角色邮箱内完成断线收尾。
+// runHook 为真时先跑 OnPlayerOffline；刷盘失败重试时为假，避免重复记离线。
+func (a *App) finishOfflineInActor(ctx context.Context, expect binding, runHook bool) error {
+	key := playerActorKey(expect.ServerID, expect.PlayerID)
+	a.mu.Lock()
+	b, ok := a.bound[key]
+	if !ok || b.ID != expect.ID || b.Term != expect.Term || b.GateAddr != expect.GateAddr {
+		a.mu.Unlock()
+		return nil
+	}
+	a.mu.Unlock()
+
+	req := Request{
+		SessionID: b.ID, ServerID: b.ServerID, PlayerID: b.PlayerID,
+		GateID: b.GateAddr, PlayerKey: b.PlayerKey,
+	}
+	if runHook {
+		if err := a.beforePlayerOffline(ctx, req); err != nil {
+			return err
+		}
+		a.mu.Lock()
+		cur, still := a.bound[key]
+		if !still || cur.ID != b.ID || cur.Term != b.Term || cur.GateAddr != b.GateAddr {
+			a.mu.Unlock()
+			return nil
+		}
+		b = cur
+		a.mu.Unlock()
+	}
+	// 钩子已过，连接已确认断开：先停在线任务，避免刷盘失败期间继续当活会话跑。
+	a.mu.Lock()
+	if cur, still := a.bound[key]; still && cur.ID == b.ID && cur.Term == b.Term && cur.GateAddr == b.GateAddr {
+		a.cancelPlayerTasksLocked(key)
+		b = cur
+	}
+	a.mu.Unlock()
+	if err := a.flushPlayer(ctx, b.Session); err != nil {
+		a.markOfflinePending(b)
+		a.queueOfflineRetry(b)
+		log.Warn("player offline flush failed", "session_id", b.ID, "server_id", b.ServerID, "player_id", b.PlayerID, "err", err)
+		return err
+	}
+	if a.Hooks.Leases != nil {
+		_ = lease.Release(ctx, a.Hooks.Leases, b.ServerID, playerLeaseKey(b.ServerID, b.PlayerID), a.Hooks.Self, b.Term)
+	}
+	var unpin func()
+	a.mu.Lock()
+	if cur, still := a.bound[key]; still && cur.ID == b.ID && cur.Term == b.Term && cur.GateAddr == b.GateAddr {
+		unpin = cur.unpin
+		a.cancelPlayerTasksLocked(key)
+		delete(a.bound, key)
+	}
+	if s, still := a.sessions[b.ID]; still && s.GateAddr == b.GateAddr {
+		delete(a.sessions, b.ID)
+	}
+	a.mu.Unlock()
+	if unpin != nil {
+		unpin()
+	}
+	log.Info("player offline", "session_id", b.ID, "server_id", b.ServerID, "player_id", b.PlayerID, "gate", b.GateAddr, "term", b.Term)
+	return nil
+}
+
+func (a *App) markOfflinePending(expect binding) {
+	key := playerActorKey(expect.ServerID, expect.PlayerID)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	cur, ok := a.bound[key]
+	if !ok || cur.ID != expect.ID || cur.Term != expect.Term || cur.GateAddr != expect.GateAddr {
+		return
+	}
+	cur.offlinePending = true
+	a.bound[key] = cur
 }
 
 func (a *App) dropGate(ctx context.Context, gateAddr string) {
@@ -906,11 +957,22 @@ func (a *App) relinquish(ctx context.Context, body []byte) error {
 }
 
 // relinquishOwner 交出共享实体主人租约；Kind 必须与 owner 键一致。
+// 刷盘前先核对应任期，避免迟到的旧交接把当前任期内的热缓存 Forget 掉。
 func (a *App) relinquishOwner(ctx context.Context, rel Release) error {
 	key := owner.Key(rel.ServerID, rel.Kind, rel.ID)
 	var out error
 	runErr := a.Actors.Do(ctx, key.String(), func() {
 		a.withGuard(func() {
+			if a.Hooks.Leases != nil && rel.Term != 0 {
+				rec, err := readLease(ctx, a.Hooks.Leases, rel.ServerID, key.String())
+				if err != nil {
+					out = err
+					return
+				}
+				if !rec.Found || rec.Owner != a.Hooks.Self || rec.Term != rel.Term {
+					return
+				}
+			}
 			if a.Hooks.FlushID != nil {
 				if err := a.Hooks.FlushID(ctx, rel.ServerID, rel.Kind, rel.ID); err != nil {
 					out = err
@@ -927,6 +989,22 @@ func (a *App) relinquishOwner(ctx context.Context, rel Release) error {
 		return runErr
 	}
 	return out
+}
+
+var errReadLease = errors.New("logic: read lease")
+
+// readLease 只读取租约快照，不改写库。
+func readLease(ctx context.Context, backend store.Locker, serverID int32, key string) (store.LeaseRec, error) {
+	if backend == nil {
+		return store.LeaseRec{}, errors.New("logic: lease backend is required")
+	}
+	rec, err := backend.MutateLease(ctx, serverID, key, func(cur store.LeaseRec) (store.LeaseRec, error) {
+		return cur, errReadLease
+	})
+	if errors.Is(err, errReadLease) {
+		return rec, nil
+	}
+	return rec, err
 }
 
 func (a *App) kick(ctx context.Context, gateAddr, sessionID string) {

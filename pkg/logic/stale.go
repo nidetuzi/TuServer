@@ -35,7 +35,7 @@ func (a *App) PrepareStalePlayer(serverID int32, playerID int64, term uint64) fu
 
 func (a *App) queueStale(b binding) {
 	// saveOne 已丢弃旧实体；清理不能再刷一遍，否则可能把新加载的实体一并 Forget。
-	a.queueCleanup(b, store.ErrStale, true)
+	a.queueCleanup(b, store.ErrStale, true, false)
 }
 
 func (a *App) discardStaleInActor(ctx context.Context, b binding) {
