@@ -28,18 +28,23 @@ func BindLocalCache(h *Host, collection string, touch func(ctx context.Context, 
 		if err != nil {
 			return nil
 		}
-		err = h.Cache.FlushEntity(ctx, e)
+		if err := h.Cache.FlushEntity(ctx, e); err != nil {
+			// 保存失败时留着脏内存，避免交出租约后对端加载到旧档。
+			return err
+		}
 		h.Cache.Forget(e)
-		return err
+		return nil
 	}
 	h.App.Hooks.FlushID = func(ctx context.Context, serverID int32, coll string, id int64) error {
 		e, err := h.Cache.Get(ctx, serverID, coll, strconv.FormatInt(id, 10), nil)
 		if err != nil {
 			return nil
 		}
-		err = h.Cache.FlushEntity(ctx, e)
+		if err := h.Cache.FlushEntity(ctx, e); err != nil {
+			return err
+		}
 		h.Cache.Forget(e)
-		return err
+		return nil
 	}
 	h.App.Hooks.PinKey = func(serverID int32, key string) func() {
 		return h.Cache.PinKey(serverID, collection, key)

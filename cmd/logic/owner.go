@@ -31,15 +31,18 @@ func newOwners(self string, actors *actor.System, nodes *cluster.Nodes, leases s
 		return resp.Body, err
 	})
 	rt.Claim = func(ctx context.Context, key owner.EntityKey) (uint64, error) {
-		rec, err := claimLease(ctx, leases, nodes, self, key.ServerID, key.String(), logic.Release{
-			Kind: logic.KindGuild, ServerID: key.ServerID, ID: key.ID,
-		})
+		rec, err := claimLease(ctx, leases, nodes, self, key.ServerID, key.String(), ownerRelease(key))
 		if err != nil {
 			return 0, err
 		}
 		return rec.Term, nil
 	}
 	return rt
+}
+
+// ownerRelease 把实体键带进交接说明；Kind 必须与租约键一致，不能写死某种业务实体。
+func ownerRelease(key owner.EntityKey) logic.Release {
+	return logic.Release{Kind: key.Kind, ServerID: key.ServerID, ID: key.ID}
 }
 
 func claimLease(ctx context.Context, leases store.Locker, nodes *cluster.Nodes, self string, serverID int32, key string, rel logic.Release) (store.LeaseRec, error) {

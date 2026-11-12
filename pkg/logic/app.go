@@ -82,7 +82,7 @@ type Hooks struct {
 	OnPlayerOffline func(*handler.Context) error
 	// TouchKey 按实体主键更新任期，不通过业务编号反查。
 	TouchKey func(ctx context.Context, serverID int32, key string, term uint64)
-	// FlushKey 按实体主键刷盘并移除角色缓存。
+	// FlushKey 按实体主键刷盘；仅成功后才应移除角色缓存。
 	FlushKey func(ctx context.Context, serverID int32, key string) error
 	// PinKey 使用实体主键钉住在线角色。
 	PinKey func(serverID int32, key string) func()
@@ -94,7 +94,7 @@ type Hooks struct {
 	AskRelease func(ctx context.Context, host string, body []byte) error
 	// Touch 把任期写进已经在内存里的角色，下一份快照才能带上 fencing。
 	Touch func(ctx context.Context, serverID int32, playerID int64, term uint64)
-	// FlushID 刷掉并忘掉某个区服集合里按业务编号找到的内存实体。
+	// FlushID 按集合与业务编号刷盘；仅成功后才应忘掉内存实体。
 	FlushID func(ctx context.Context, serverID int32, collection string, id int64) error
 	// Kick 让网关关掉旧连接。
 	Kick func(ctx context.Context, gateAddr, sessionID string)
@@ -640,7 +640,12 @@ func (a *App) onDisconnect(ctx context.Context, req Request) error {
 				offlineErr = err
 				return
 			}
-			_ = a.flushPlayer(ctx, b.Session)
+			if err := a.flushPlayer(ctx, b.Session); err != nil {
+				// 连接已断但仍持有租约，留给定时刷盘；交出租约会让对端读到旧档。
+				offlineErr = err
+				log.Warn("player offline flush failed", "session_id", req.SessionID, "server_id", req.ServerID, "player_id", req.PlayerID, "err", err)
+				return
+			}
 			if a.Hooks.Leases != nil {
 				_ = lease.Release(ctx, a.Hooks.Leases, req.ServerID, playerLeaseKey(req.ServerID, req.PlayerID), a.Hooks.Self, b.Term)
 			}
@@ -826,55 +831,102 @@ func (a *App) relinquish(ctx context.Context, body []byte) error {
 	if err := json.Unmarshal(body, &rel); err != nil {
 		return err
 	}
-	if rel.Kind == KindGuild {
-		key := owner.Key(rel.ServerID, KindGuild, rel.ID)
-		return a.Actors.Do(ctx, key.String(), func() {
-			a.withGuard(func() {
-				if a.Hooks.FlushID != nil {
-					_ = a.Hooks.FlushID(ctx, rel.ServerID, KindGuild, rel.ID)
-				}
-				if a.Hooks.Leases != nil {
-					_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, key.String(), a.Hooks.Self, rel.Term)
-				}
-			})
-		})
-	}
-	if rel.ID == 0 {
+	if rel.ID == 0 || rel.Kind == "" {
 		return nil
 	}
-	return a.Actors.Do(ctx, playerActorKey(rel.ServerID, rel.ID), func() {
+	if rel.Kind != KindPlayer {
+		return a.relinquishOwner(ctx, rel)
+	}
+	var out error
+	runErr := a.Actors.Do(ctx, playerActorKey(rel.ServerID, rel.ID), func() {
 		a.withGuard(func() {
 			key := playerActorKey(rel.ServerID, rel.ID)
 			a.mu.Lock()
 			b, ok := a.bound[key]
-			var unpin func()
-			if ok {
-				unpin = b.unpin
-				a.cancelPlayerTasksLocked(key)
-				delete(a.bound, key)
-				delete(a.sessions, b.ID)
+			if ok && rel.Term != 0 && b.Term != 0 && rel.Term != b.Term {
+				// 迟到的旧交接不能清掉已经持有更新任期的会话。
+				a.mu.Unlock()
+				return
 			}
 			a.mu.Unlock()
+			var flushErr error
 			if ok {
-				_ = a.flushPlayer(ctx, b.Session)
+				flushErr = a.flushPlayer(ctx, b.Session)
 			} else if a.Hooks.FlushKey == nil && a.Hooks.FlushID != nil {
-				_ = a.Hooks.FlushID(ctx, rel.ServerID, KindPlayer, rel.ID)
+				flushErr = a.Hooks.FlushID(ctx, rel.ServerID, KindPlayer, rel.ID)
 			}
-			if a.Hooks.Leases != nil {
-				term := rel.Term
-				if ok && b.Term != 0 {
-					term = b.Term
+			if flushErr != nil {
+				out = flushErr
+				log.Warn("relinquish flush failed", "kind", KindPlayer, "server_id", rel.ServerID, "id", rel.ID, "term", rel.Term, "err", flushErr)
+				return
+			}
+			a.mu.Lock()
+			cur, still := a.bound[key]
+			if still && rel.Term != 0 && cur.Term != 0 && rel.Term != cur.Term {
+				a.mu.Unlock()
+				return
+			}
+			if still && ok && (cur.ID != b.ID || cur.Term != b.Term) {
+				// 刷盘期间会话已被更新任期或新连接替换，不能按旧快照清掉。
+				a.mu.Unlock()
+				return
+			}
+			var unpin func()
+			term := rel.Term
+			kickGate, kickSession := "", ""
+			if still {
+				unpin = cur.unpin
+				term = cur.Term
+				if term == 0 {
+					term = rel.Term
 				}
+				if cur.ID != rel.Session || cur.GateAddr != rel.Gate {
+					kickGate, kickSession = cur.GateAddr, cur.ID
+				}
+				a.cancelPlayerTasksLocked(key)
+				delete(a.bound, key)
+				delete(a.sessions, cur.ID)
+			}
+			a.mu.Unlock()
+			if a.Hooks.Leases != nil {
 				_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, playerLeaseKey(rel.ServerID, rel.ID), a.Hooks.Self, term)
 			}
 			if unpin != nil {
 				unpin()
 			}
-			if ok && (b.ID != rel.Session || b.GateAddr != rel.Gate) {
-				a.kick(ctx, b.GateAddr, b.ID)
+			if kickSession != "" {
+				a.kick(ctx, kickGate, kickSession)
 			}
 		})
 	})
+	if runErr != nil {
+		return runErr
+	}
+	return out
+}
+
+// relinquishOwner 交出共享实体主人租约；Kind 必须与 owner 键一致。
+func (a *App) relinquishOwner(ctx context.Context, rel Release) error {
+	key := owner.Key(rel.ServerID, rel.Kind, rel.ID)
+	var out error
+	runErr := a.Actors.Do(ctx, key.String(), func() {
+		a.withGuard(func() {
+			if a.Hooks.FlushID != nil {
+				if err := a.Hooks.FlushID(ctx, rel.ServerID, rel.Kind, rel.ID); err != nil {
+					out = err
+					log.Warn("relinquish flush failed", "kind", rel.Kind, "server_id", rel.ServerID, "id", rel.ID, "term", rel.Term, "err", err)
+					return
+				}
+			}
+			if a.Hooks.Leases != nil {
+				_ = lease.Release(ctx, a.Hooks.Leases, rel.ServerID, key.String(), a.Hooks.Self, rel.Term)
+			}
+		})
+	})
+	if runErr != nil {
+		return runErr
+	}
+	return out
 }
 
 func (a *App) kick(ctx context.Context, gateAddr, sessionID string) {

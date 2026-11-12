@@ -16,13 +16,15 @@ const (
 	// InternalCaller 是租约交接请求上的占位 Gate 地址，避免被当成某台网关去回推。
 	// 它不是鉴权凭证。内部调用必须另带 Request.Internal，并由节点间验签确认。
 	InternalCaller = "internal"
-	// KindPlayer 和 KindGuild 区分交接的是角色还是公会。
+	// KindPlayer 表示交接角色会话租约；其它 kind 走共享实体主人交接（如 guild）。
 	KindPlayer = "player"
-	KindGuild  = "guild"
+	// KindGuild 是公会共享实体的 kind，仅作约定常量，交接体以 Release.Kind 为准。
+	KindGuild = "guild"
 )
 
 // Release 是交出租约时带给旧持有者的说明。
-// Session 与本次接手的连接相同时不踢线，避免网关重选节点把还在用的连接关掉。
+// Kind 必须与租约键上的实体种类一致；Session 与本次接手的连接相同时不踢线，避免网关重选节点把还在用的连接关掉。
+// Term 用于挡住迟到的旧交接：目标节点已持有更新任期时不得清掉新会话。
 type Release struct {
 	Kind     string `json:"kind"`
 	ServerID int32  `json:"server_id"`
